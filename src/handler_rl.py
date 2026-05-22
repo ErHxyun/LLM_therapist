@@ -54,6 +54,16 @@ class HandlerRL:
         logger.info("Initializing RL handler setup: loading records and question library.")
         init_record()
         self.question_lib = load_question_lib(QUESTION_LIB_FILENAME)
+        dimension_count = len(self.question_lib)
+        expected_n_states = dimension_count + 2  # START + 37 dimensions + END.
+        if ITEM_N_STATES != expected_n_states:
+            logger.warning(
+                "Configured ITEM_N_STATES=%s, but question library has %s dimensions; "
+                "paper-consistent state count should be %s.",
+                ITEM_N_STATES,
+                dimension_count,
+                expected_n_states,
+            )
         # Define possible actions for item selection (as string indices)
         item_actions = ['{0}'.format(e) for e in np.arange(0, ITEM_N_STATES)]
         # # Initialize masks and question-level Q-tables are deprecated; single-question per item is used
@@ -64,16 +74,30 @@ class HandlerRL:
 
         # Build action id -> label mapping for logging readability
         # Action "0" is a synthetic start/index action and not part of the question lib
-        self.item_action_labels = {"0": "INIT"}
-        for i in range(1, ITEM_N_STATES):
+        # Action ITEM_N_STATES - 1 is the paper's explicit END state and is masked out.
+        self.item_action_labels = {"0": "START", str(ITEM_N_STATES - 1): "END"}
+        for i in range(1, dimension_count + 1):
             self.item_action_labels[str(i)] = self.question_lib[str(i)]["1"]["label"]
   
         # Load persistent Q tables (if exist)
         qdir = os.path.join(DATA_DIR, "q_tables")
         qfile = os.path.join(qdir, f"item_qtable_{SUBJECT_ID}.csv")
         if os.path.exists(qfile):
-            self.item_q_table = pd.read_csv(qfile, index_col=0)
-            logger.info(f"Loaded item Q table for subject {SUBJECT_ID} from {qfile}.")
+            loaded_q_table = pd.read_csv(qfile, index_col=0)
+            expected_columns = list(self.item_q_table.columns)
+            if loaded_q_table.shape == self.item_q_table.shape and list(loaded_q_table.columns) == expected_columns:
+                self.item_q_table = loaded_q_table
+                logger.info(f"Loaded item Q table for subject {SUBJECT_ID} from {qfile}.")
+            else:
+                logger.warning(
+                    "Ignoring incompatible item Q table at %s. Expected shape=%s columns=%s, "
+                    "got shape=%s columns=%s. A paper-consistent table will be initialized.",
+                    qfile,
+                    self.item_q_table.shape,
+                    expected_columns,
+                    loaded_q_table.shape,
+                    list(loaded_q_table.columns),
+                )
         else:
             logger.info(f"Item Q table for subject {SUBJECT_ID} not found at {qfile}. ")
         
@@ -112,8 +136,9 @@ class HandlerRL:
         new_q_table = self.item_q_table.copy()
         S = 0  # Start state for item RL
         is_terminated = False
-        # Mask for available items (first item is always available)
-        item_mask = [0] + [1] * (ITEM_N_STATES - 1)
+        dimension_count = len(self.question_lib)
+        # Mask for available actions: START and END are states, not screening dimensions to ask.
+        item_mask = [0] + [1] * dimension_count + [0]
         while not is_terminated:
             # If all items have been asked, exit to CBT directly
             if sum(item_mask) == 0:
@@ -122,6 +147,10 @@ class HandlerRL:
                 break
             # Select an item to ask about using RL policy
             A = choose_action(S, self.item_q_table, item_mask, ITEM_N_STATES, self.item_actions, self.item_action_labels)
+            if int(A) < 1 or int(A) > dimension_count:
+                is_terminated = True
+                logger.info("RL selected non-screening state %s. Proceeding to CBT.", A)
+                break
             # Mark this item as used
             item_mask[int(A)] = 0
             # Ask questions for the selected item

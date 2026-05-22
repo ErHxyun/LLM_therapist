@@ -12,21 +12,38 @@ paths:
   record_csv: "data/record.csv"
 
 rl:
-  item_n_states: 38
-  epsilon: 1 # exploitation rate
-  alpha: 0.5 # learning rate
+  # Paper Section 4.2: 37 dimensions + START + END = 39 states.
+  item_n_states: 39
+  epsilon: 0.9 # exploitation rate
+  alpha: 0.1 # learning rate
   gamma: 0.9 # discount factor
   # item_importance: [0, 5, 4, 4, 2, 5, 2, 2, 1, 3, 4, 3, 1, 4, 2, 4, 3, 1, 4, 4]
   # number_questions: [0, 4, 1, 2, 2, 5, 1, 1, 1, 2, 3, 2, 1, 1, 3, 2, 1, 3, 1, 1]
   # item_importance: [0, 5, 5, 5, 5, 4, 4, 4, 2, 2, 5, 5, 5, 5, 5, 2, 2, 1, 3, 3, 4, 4, 4, 3, 3, 1, 4, 2, 2, 2, 4, 4, 3, 1, 1, 1, 4, 4]
   # number_questions: [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
   
-  # changed for stable re-creation of test runs
-  item_importance: [0, 5, 98, 99, 5, 4, 4, 4, 2, 2, 5, 97, 5, 5, 5, 2, 2, 1, 3, 3, 4, 4, 4, 3, 3, 1, 4, 2, 2, 2, 4, 4, 3, 1, 1, 1, 4, 4]
-  number_questions: [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+  item_importance: [0, 5, 5, 5, 5, 4, 4, 4, 2, 2, 5, 5, 5, 5, 5, 2, 2, 1, 3, 3, 4, 4, 4, 3, 3, 1, 4, 2, 2, 2, 4, 4, 3, 1, 1, 1, 4, 4, 0]
+  number_questions: [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0]
  
-openai:
-  base_url: "https://us.api.openai.com/v1"
-  model: "gpt-5"
+local_llm:
+  model_id: "xxue752/caiti_best_model"
+  base_subdir: "compressed_model_int4"
+  tokenizer_id: "xxue752/caiti_best_model"
+  tokenizer_subdir: "compressed_model_int4"
+  device_map: "auto"
+  torch_dtype: "auto"
+  max_input_tokens: 2048
+  default_max_new_tokens: 128
   temperature: 0.7
-  max_tokens: 400
+  top_p: 0.95
+
+voice:
+  # Paper Section 4 keeps semantic analysis text-only. These commands are I/O only:
+  # STT converts microphone audio to text before the LLM pipeline; TTS speaks text after generation.
+  stt_backend: "console" # console | command
+  tts_backend: "console" # console | command
+  stt_command: "" # local command that records/transcribes and writes transcript to stdout
+  tts_command: "" # local command that reads text from stdin and plays speech
+  stt_timeout_sec: 120
+  tts_timeout_sec: 60
+  empty_transcript_retries: 2

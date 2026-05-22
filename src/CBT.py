@@ -1,10 +1,13 @@
 import re
 
-from src.utils.llm_client import llm_complete
+from src.local_llm.types import LLMTask
+from src.utils.llm_client import llm_complete, llm_complete_task
+from src.utils.llm_output_contracts import normalize_decision_output, parse_binary_decision
 
 # Set up logger for this module
 from src.utils.log_util import get_logger
 from src.utils.io_record import get_resp_log, log_question, set_question_prefix
+from src.utils.session_event_logger import log_llm_event
 logger = get_logger("CBT")
 
 
@@ -270,50 +273,338 @@ Example 2:
 REFRAME: My ideas have value, and sharing them can contribute to the discussion. Others are likely focused on the topic, not on judging me, and speaking up can help me grow more confident.
 '''
 
+BOUNDED_CBT_STAGE1_GUIDE_PROMPT = '''You are the CaiTI CBT Stage 1 Guide.
+The Stage 1 Reasoner decided the client's response did not yet identify an unhelpful thought.
+
+Input format:
+STATEMENT: xxxx
+
+Task:
+Generate a brief scaffold that helps the client identify their own unhelpful thought about the statement.
+
+Boundaries:
+- Do not write the unhelpful thought for the client.
+- Do not diagnose.
+- Do not provide clinical advice or action plans.
+- Do not ask what the statement means.
+- Focus only on the thought, belief, or self-talk that came up for the client.
+- Do not introduce new interpretations, causes, emotions, or examples.
+- Ask the client to answer in their own words.
+- Prefer asking for "one unhelpful thought" directly.
+- 1-2 sentences only.
+
+Response format:
+GUIDE: xxxx
+'''
+
+BOUNDED_CBT_STAGE2_GUIDE_PROMPT = '''You are the CaiTI CBT Stage 2 Guide.
+The Stage 2 Reasoner decided the client's response did not yet challenge the unhelpful thought.
+
+Input format:
+STATEMENT: xxxx
+UNHELPFUL_THOUGHTS: xxxx
+
+Task:
+Generate a brief scaffold that helps the client challenge their own unhelpful thought.
+
+Boundaries:
+- Do not write the challenge for the client.
+- Do not diagnose.
+- Do not provide clinical advice or action plans.
+- You may mention checking whether the thought is always true, evidence for/against it, or a more balanced view.
+- Keep the scaffold process-focused; do not provide content-specific evidence or a ready-made challenge.
+- Do not introduce new interpretations, causes, emotions, examples, or advice.
+- Do not ask for examples or past situations; ask for the challenge itself.
+- Ask the client to answer in their own words.
+- 1-2 sentences only.
+
+Response format:
+GUIDE: xxxx
+'''
+
+BOUNDED_CBT_STAGE3_GUIDE_PROMPT = '''You are the CaiTI CBT Stage 3 Guide.
+The Stage 3 Reasoner decided the client's response did not yet reframe the unhelpful thought.
+
+Input format:
+STATEMENT: xxxx
+UNHELPFUL_THOUGHTS: xxxx
+CHALLENGE: xxxx
+
+Task:
+Generate a brief scaffold that helps the client reframe their own unhelpful thought into a more balanced, realistic, constructive thought.
+
+Boundaries:
+- Do not write the reframe for the client.
+- Do not diagnose.
+- Do not provide clinical advice or action plans.
+- Do not provide a possible balanced thought, conclusion, reassurance, or new interpretation.
+- Refer to the user's challenge only as material they can use; do not complete the reframe for them.
+- Do not introduce new interpretations, causes, emotions, examples, or advice.
+- Do not ask for examples or other situations; ask for one balanced sentence in the client's own words.
+- Do not mention worth, value, competence, identity, or self-esteem unless the client already used those words.
+- Ask the client to answer in their own words.
+- 1-2 sentences only.
+
+Response format:
+GUIDE: xxxx
+'''
+
+ADAPTER_CBT_STAGE1_PROMPT = REASONER_CBT_STAGE1_PROMPT
+ADAPTER_CBT_STAGE2_PROMPT = REASONER_CBT_STAGE2_PROMPT
+ADAPTER_CBT_STAGE3_PROMPT = REASONER_CBT_STAGE3_PROMPT
+
+CBT_PROFESSIONAL_HELP_MESSAGE = (
+    "This part seems difficult right now. We will end CBT for now, and it may be "
+    "helpful to seek support from a mental health professional for a more effective "
+    "CBT experience."
+)
+
+
+def parse_cbt_decision(raw_text: str, default: str = "1") -> str:
+    return parse_binary_decision(raw_text, default=default)
+
+
+def _format_stage1_input(statement: str, unhelpful_thoughts: str) -> str:
+    return f'"STATEMENT: {statement}; UNHELPFUL_THOUGHTS: {unhelpful_thoughts};"'
+
+
+def _format_stage2_input(statement: str, unhelpful_thoughts: str, challenge: str) -> str:
+    return (
+        f'"STATEMENT: {statement}; UNHELPFUL_THOUGHTS: {unhelpful_thoughts}; '
+        f'CHALLENGE: {challenge};"'
+    )
+
+
+def _format_stage3_input(
+    statement: str,
+    unhelpful_thoughts: str,
+    challenge: str,
+    reframe: str,
+) -> str:
+    return (
+        f'"STATEMENT: {statement}; UNHELPFUL_THOUGHTS: {unhelpful_thoughts}; '
+        f'CHALLENGE: {challenge}; REFRAME: {reframe};"'
+    )
+
+
 def _chat_complete(system_content: str, user_content: str):
     return llm_complete(system_content, user_content)
+
+def clean_cbt_guide_text(text: str, fallback: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return fallback
+
+    match = re.search(r"GUIDE:\s*(.+?)(?:\n\n|\nGUIDE:|$)", raw, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        raw = match.group(1).strip()
+    raw = re.sub(r"^(GUIDE|Guide|guide)\s*:\s*", "", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", raw) if sentence.strip()]
+    if len(sentences) > 2:
+        raw = " ".join(sentences[:2]).strip()
+    if raw and raw[-1] not in ".!?":
+        raw += "."
+    return f"GUIDE: {raw}" if raw else fallback
+
+
+def _stage3_guide_oversteps(guide: str) -> bool:
+    lower = str(guide or "").lower()
+    overstep_markers = (
+        "your worth",
+        "your value",
+        "your competence",
+        "your identity",
+        "self-esteem",
+        "doesn't define",
+        "does not define",
+        "you are not",
+        "you're not",
+    )
+    return any(marker in lower for marker in overstep_markers)
 
 def stage0_prompter(history: str) -> str:
     payload = f"HISTORY: {history}"
     return _chat_complete(PROMPTER_CBT_STAGE0_PROMPT, payload)
 
-def stage1_reasoner(statement: str, unhelpful_thoughts: str) -> str:
-    payload = f'"STATEMENT: {statement}; UNHELPFUL_THOUGHTS: {unhelpful_thoughts};"'
-    return _chat_complete(REASONER_CBT_STAGE1_PROMPT, payload)
+def stage1_reasoner(statement: str, unhelpful_thoughts: str, dimension: str | None = None) -> str:
+    payload = _format_stage1_input(statement, unhelpful_thoughts)
+    raw = llm_complete_task(
+        LLMTask.TASK4_CBT_STAGE1,
+        ADAPTER_CBT_STAGE1_PROMPT,
+        payload,
+        max_new_tokens=8,
+    ).text
+    contract = normalize_decision_output(raw)
+    decision = contract.decision
+    normalized = contract.normalized_output
+    log_llm_event(
+        task=LLMTask.TASK4_CBT_STAGE1,
+        dimension=dimension,
+        score=decision,
+        segment_text=unhelpful_thoughts,
+        question_text=statement,
+        raw_llm_output=raw,
+        normalized_output=normalized,
+        metadata={"cbt_stage": 1, "statement": statement, "reasoner_payload": payload},
+    )
+    return normalized
 
-def stage2_reasoner(statement: str, unhelpful_thoughts: str, challenge: str) -> str:
-    payload = f'"STATEMENT: {statement}; UNHELPFUL_THOUGHTS: {unhelpful_thoughts}; CHALLENGE: {challenge};"'
-    return _chat_complete(REASONER_CBT_STAGE2_PROMPT, payload)
+def stage2_reasoner(
+    statement: str,
+    unhelpful_thoughts: str,
+    challenge: str,
+    dimension: str | None = None,
+) -> str:
+    payload = _format_stage2_input(statement, unhelpful_thoughts, challenge)
+    raw = llm_complete_task(
+        LLMTask.TASK4_CBT_STAGE2,
+        ADAPTER_CBT_STAGE2_PROMPT,
+        payload,
+        max_new_tokens=8,
+    ).text
+    contract = normalize_decision_output(raw)
+    decision = contract.decision
+    normalized = contract.normalized_output
+    log_llm_event(
+        task=LLMTask.TASK4_CBT_STAGE2,
+        dimension=dimension,
+        score=decision,
+        segment_text=challenge,
+        question_text=statement,
+        raw_llm_output=raw,
+        normalized_output=normalized,
+        metadata={
+            "cbt_stage": 2,
+            "statement": statement,
+            "unhelpful_thoughts": unhelpful_thoughts,
+            "reasoner_payload": payload,
+        },
+    )
+    return normalized
 
-def stage3_reasoner(statement: str, unhelpful_thoughts: str, challenge: str, reframe: str) -> str:
-    payload = f'"STATEMENT: {statement}; UNHELPFUL_THOUGHTS: {unhelpful_thoughts}; CHALLENGE: {challenge}; REFRAME: {reframe};"'
-    return _chat_complete(REASONER_CBT_STAGE3_PROMPT, payload)
+def stage3_reasoner(
+    statement: str,
+    unhelpful_thoughts: str,
+    challenge: str,
+    reframe: str,
+    dimension: str | None = None,
+) -> str:
+    payload = _format_stage3_input(statement, unhelpful_thoughts, challenge, reframe)
+    raw = llm_complete_task(
+        LLMTask.TASK4_CBT_STAGE3,
+        ADAPTER_CBT_STAGE3_PROMPT,
+        payload,
+        max_new_tokens=8,
+    ).text
+    contract = normalize_decision_output(raw)
+    decision = contract.decision
+    normalized = contract.normalized_output
+    log_llm_event(
+        task=LLMTask.TASK4_CBT_STAGE3,
+        dimension=dimension,
+        score=decision,
+        segment_text=reframe,
+        question_text=statement,
+        raw_llm_output=raw,
+        normalized_output=normalized,
+        metadata={
+            "cbt_stage": 3,
+            "statement": statement,
+            "unhelpful_thoughts": unhelpful_thoughts,
+            "challenge": challenge,
+            "reasoner_payload": payload,
+        },
+    )
+    return normalized
 
 def stage1_guide(statement: str) -> str:
     payload = f"STATEMENT: {statement}"
-    return _chat_complete(GUIDE_CBT_STAGE1_PROMPT, payload)
+    raw = _chat_complete(BOUNDED_CBT_STAGE1_GUIDE_PROMPT, payload)
+    guide = clean_cbt_guide_text(
+        raw,
+        "GUIDE: Please identify one unhelpful thought in your own words.",
+    )
+    log_llm_event(
+        task="cbt_stage1_guide",
+        segment_text=statement,
+        raw_llm_output=raw,
+        normalized_output=guide,
+        metadata={"mode": "bounded_generation", "cbt_stage": 1, "payload": payload},
+    )
+    return guide
 
 def stage2_guide(statement: str, unhelpful_thoughts: str) -> str:
-    payload = f"STATEMENT: {statement}. UNHELPFUL_THOUGHTS: {unhelpful_thoughts}"
-    return _chat_complete(GUIDE_CBT_STAGE2_PROMPT, payload)
+    payload = f"STATEMENT: {statement}\nUNHELPFUL_THOUGHTS: {unhelpful_thoughts}"
+    raw = _chat_complete(BOUNDED_CBT_STAGE2_GUIDE_PROMPT, payload)
+    guide = clean_cbt_guide_text(
+        raw,
+        "GUIDE: Please challenge that thought in your own words by checking whether it is always true.",
+    )
+    log_llm_event(
+        task="cbt_stage2_guide",
+        segment_text=unhelpful_thoughts,
+        question_text=statement,
+        raw_llm_output=raw,
+        normalized_output=guide,
+        metadata={"mode": "bounded_generation", "cbt_stage": 2, "payload": payload},
+    )
+    return guide
 
 def stage3_guide(statement: str, unhelpful_thoughts: str, challenge: str) -> str:
-    payload = f"STATEMENT: {statement}. UNHELPFUL_THOUGHTS: {unhelpful_thoughts}. CHALLENGE: {challenge}"
-    return _chat_complete(GUIDE_CBT_STAGE3_PROMPT, payload)
-
-def recap_stage3_challenge(statement: str, unhelpful_thoughts: str, challenge: str) -> str:
     payload = (
         f"STATEMENT: {statement}\n"
         f"UNHELPFUL_THOUGHTS: {unhelpful_thoughts}\n"
         f"CHALLENGE: {challenge}"
     )
-    return _chat_complete(RECAP_CBT_STAGE3_CHALLENGE_PROMPT, payload)
+    raw = _chat_complete(BOUNDED_CBT_STAGE3_GUIDE_PROMPT, payload)
+    fallback = "GUIDE: Please use your challenge to write one balanced sentence in your own words."
+    guide = clean_cbt_guide_text(raw, fallback)
+    if _stage3_guide_oversteps(guide):
+        guide = fallback
+    log_llm_event(
+        task="cbt_stage3_guide",
+        segment_text=challenge,
+        question_text=statement,
+        raw_llm_output=raw,
+        normalized_output=guide,
+        metadata={
+            "mode": "bounded_generation",
+            "cbt_stage": 3,
+            "unhelpful_thoughts": unhelpful_thoughts,
+            "payload": payload,
+        },
+    )
+    return guide
+
+def recap_stage3_challenge(statement: str, unhelpful_thoughts: str, challenge: str) -> str:
+    challenge_text = " ".join(str(challenge or "").split())
+    recap = (
+        f'You challenged the thought by saying: "{challenge_text}"'
+        if challenge_text
+        else "You have already challenged the unhelpful thought."
+    )
+    log_llm_event(
+        task="cbt_stage3_recap",
+        segment_text=challenge,
+        question_text=statement,
+        raw_llm_output=recap,
+        normalized_output=recap,
+        metadata={
+            "mode": "challenge_recap",
+            "cbt_stage": 3,
+            "unhelpful_thoughts": unhelpful_thoughts,
+        },
+    )
+    return recap
 
 __all__ = [
     "stage0_prompter",
     "stage1_reasoner",
     "stage2_reasoner",
     "stage3_reasoner",
+    "parse_cbt_decision",
     "stage1_guide",
     "stage2_guide",
     "stage3_guide",
@@ -447,8 +738,8 @@ def run_cbt(question_lib):
         return
 
     # Reason and guide up to two retries
-    dec1_raw = stage1_reasoner(statement, unhelpful)
-    dec1 = "0" if "0" in dec1_raw else "1"
+    dec1_raw = stage1_reasoner(statement, unhelpful, dimension=label_sel)
+    dec1 = parse_cbt_decision(dec1_raw)
     retry = 0
     while dec1 == "1" and retry < 2:
         guide1 = stage1_guide(statement)
@@ -458,11 +749,11 @@ def run_cbt(question_lib):
         if isinstance(unhelpful, str) and unhelpful.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 1 retry.")
             return
-        dec1_raw = stage1_reasoner(statement, unhelpful)
-        dec1 = "0" if "0" in dec1_raw else "1"
+        dec1_raw = stage1_reasoner(statement, unhelpful, dimension=label_sel)
+        dec1 = parse_cbt_decision(dec1_raw)
         retry += 1
     if dec1 == "1":
-        log_question("It seems difficult to identify the unhelpful thoughts right now. Let's pause CBT and revisit later.")
+        log_question(CBT_PROFESSIONAL_HELP_MESSAGE)
         # record brief CBT notes
         question_lib[str(i_sel)][str(j_sel)]["notes"].append([
             f"CBT_dimension: {label_sel}",
@@ -479,8 +770,8 @@ def run_cbt(question_lib):
         logger.info("User requested stop at CBT stage 2.")
         return
 
-    dec2_raw = stage2_reasoner(statement, unhelpful, challenge)
-    dec2 = "0" if "0" in dec2_raw else "1"
+    dec2_raw = stage2_reasoner(statement, unhelpful, challenge, dimension=label_sel)
+    dec2 = parse_cbt_decision(dec2_raw)
     retry = 0
     while dec2 == "1" and retry < 2:
         guide2 = stage2_guide(statement, unhelpful)
@@ -490,11 +781,11 @@ def run_cbt(question_lib):
         if isinstance(challenge, str) and challenge.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 2 retry.")
             return
-        dec2_raw = stage2_reasoner(statement, unhelpful, challenge)
-        dec2 = "0" if "0" in dec2_raw else "1"
+        dec2_raw = stage2_reasoner(statement, unhelpful, challenge, dimension=label_sel)
+        dec2 = parse_cbt_decision(dec2_raw)
         retry += 1
     if dec2 == "1":
-        log_question("Challenging the thought seems difficult now. Let's pause CBT and revisit later.")
+        log_question(CBT_PROFESSIONAL_HELP_MESSAGE)
         question_lib[str(i_sel)][str(j_sel)]["notes"].append([
             f"CBT_dimension: {label_sel}",
             f"CBT_statement: {statement}",
@@ -513,8 +804,8 @@ def run_cbt(question_lib):
         logger.info("User requested stop at CBT stage 3.")
         return
 
-    dec3_raw = stage3_reasoner(statement, unhelpful, challenge, reframe)
-    dec3 = "0" if "0" in dec3_raw else "1"
+    dec3_raw = stage3_reasoner(statement, unhelpful, challenge, reframe, dimension=label_sel)
+    dec3 = parse_cbt_decision(dec3_raw)
     retry = 0
     while dec3 == "1" and retry < 2:
         guide3 = stage3_guide(statement, unhelpful, challenge)
@@ -524,11 +815,11 @@ def run_cbt(question_lib):
         if isinstance(reframe, str) and reframe.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 3 retry.")
             return
-        dec3_raw = stage3_reasoner(statement, unhelpful, challenge, reframe)
-        dec3 = "0" if "0" in dec3_raw else "1"
+        dec3_raw = stage3_reasoner(statement, unhelpful, challenge, reframe, dimension=label_sel)
+        dec3 = parse_cbt_decision(dec3_raw)
         retry += 1
     if dec3 == "1":
-        log_question("Reframing seems hard right now. Let's pause CBT and revisit later.")
+        log_question(CBT_PROFESSIONAL_HELP_MESSAGE)
         question_lib[str(i_sel)][str(j_sel)]["notes"].append([
             f"CBT_dimension: {label_sel}",
             f"CBT_statement: {statement}",

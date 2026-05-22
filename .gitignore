@@ -16,6 +16,5 @@ workflow.png
 src/tools/
 .cursorignore
 
-tests/
 _archive/
 # data/

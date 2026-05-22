@@ -18,7 +18,8 @@ _CFG = _load_yaml_config()
 APP = _CFG["app"]
 PATHS = _CFG["paths"]
 RL = _CFG["rl"]
-OPENAI = _CFG["openai"]
+LOCAL_LLM = _CFG.get("local_llm", {})
+VOICE = _CFG.get("voice", {})
 
 SUBJECT_ID = str(APP["subject_id"])
 
@@ -40,9 +41,61 @@ GAMMA = float(RL["gamma"])
 ITEM_IMPORTANCE = RL["item_importance"]
 NUMBER_QUESTIONS = RL["number_questions"]
 
-OPENAI_BASE_URL = OPENAI.get("base_url", os.environ.get("OPENAI_BASE_URL", "https://us.api.openai.com/v1"))
-OPENAI_MODEL = OPENAI["model"]
-OPENAI_TEMPERATURE = float(OPENAI["temperature"])
-OPENAI_MAX_TOKENS = int(OPENAI["max_tokens"])
+LOCAL_LLM_MODEL_ID = os.environ.get(
+    "CAITI_MODEL_ID",
+    LOCAL_LLM.get("model_id", "xxue752/caiti_best_model"),
+)
+LOCAL_LLM_BASE_SUBDIR = os.environ.get(
+    "CAITI_BASE_SUBDIR",
+    LOCAL_LLM.get("base_subdir", "compressed_model_int4"),
+)
+LOCAL_LLM_TOKENIZER_ID = os.environ.get(
+    "CAITI_TOKENIZER_ID",
+    LOCAL_LLM.get("tokenizer_id", LOCAL_LLM_MODEL_ID),
+)
+LOCAL_LLM_TOKENIZER_SUBDIR = os.environ.get(
+    "CAITI_TOKENIZER_SUBDIR",
+    LOCAL_LLM.get("tokenizer_subdir", LOCAL_LLM_BASE_SUBDIR),
+)
+LOCAL_LLM_DEVICE_MAP = os.environ.get(
+    "CAITI_DEVICE_MAP",
+    str(LOCAL_LLM.get("device_map", "auto")),
+)
+LOCAL_LLM_TORCH_DTYPE = os.environ.get(
+    "CAITI_TORCH_DTYPE",
+    str(LOCAL_LLM.get("torch_dtype", "auto")),
+)
+LOCAL_LLM_MAX_INPUT_TOKENS = int(
+    os.environ.get(
+        "CAITI_MAX_INPUT_TOKENS",
+        str(LOCAL_LLM.get("max_input_tokens", 2048)),
+    )
+)
+LOCAL_LLM_DEFAULT_MAX_NEW_TOKENS = int(
+    os.environ.get(
+        "CAITI_DEFAULT_MAX_NEW_TOKENS",
+        str(LOCAL_LLM.get("default_max_new_tokens", 128)),
+    )
+)
+LOCAL_LLM_TEMPERATURE = float(
+    os.environ.get("CAITI_TEMPERATURE", str(LOCAL_LLM.get("temperature", 0.7)))
+)
+LOCAL_LLM_TOP_P = float(
+    os.environ.get("CAITI_TOP_P", str(LOCAL_LLM.get("top_p", 0.95)))
+)
+
+VOICE_STT_BACKEND = os.environ.get("CAITI_STT_BACKEND", str(VOICE.get("stt_backend", "console")))
+VOICE_TTS_BACKEND = os.environ.get("CAITI_TTS_BACKEND", str(VOICE.get("tts_backend", "console")))
+VOICE_STT_COMMAND = os.environ.get("CAITI_STT_COMMAND", str(VOICE.get("stt_command", "")))
+VOICE_TTS_COMMAND = os.environ.get("CAITI_TTS_COMMAND", str(VOICE.get("tts_command", "")))
+VOICE_STT_TIMEOUT_SEC = int(
+    os.environ.get("CAITI_STT_TIMEOUT_SEC", str(VOICE.get("stt_timeout_sec", 120)))
+)
+VOICE_TTS_TIMEOUT_SEC = int(
+    os.environ.get("CAITI_TTS_TIMEOUT_SEC", str(VOICE.get("tts_timeout_sec", 60)))
+)
+VOICE_EMPTY_TRANSCRIPT_RETRIES = int(
+    os.environ.get("CAITI_EMPTY_TRANSCRIPT_RETRIES", str(VOICE.get("empty_transcript_retries", 2)))
+)
 
 

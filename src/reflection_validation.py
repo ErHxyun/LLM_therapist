@@ -1,10 +1,14 @@
 # src/reflection_validation.py
 
-import os
-import logging
-from src.utils.llm_client import llm_complete
+import json
+import re
+
+from src.local_llm.types import LLMTask
+from src.utils.llm_client import llm_complete, llm_complete_task
+from src.utils.llm_output_contracts import normalize_decision_output, parse_binary_decision
 # Set up logger for this module
 from src.utils.log_util import get_logger
+from src.utils.session_event_logger import log_llm_event
 logger = get_logger("ReflectionValidation")
 
 # Prompt for the reasoner: checks if follow-up is related to topic or original response
@@ -46,50 +50,43 @@ Example 5:
 DECISION: 1
 '''
 
-# Prompt for the guide: helps user provide a more relevant follow-up
-RV_FOLLOW_UP_GUIDE_SYSTEM_PROMPT = '''You are an AI assistant who has rich psychology and mental health commonsense knowledge and strong reasoning abilities.
-You are in the conversation with a client.
+RV_GUIDE_REDIRECT_TEMPLATE = (
+    'Guide: Thank you for sharing that. I want to return to what you mentioned earlier: '
+    '"{original_response}"{ending} Could you tell me more about that?'
+)
 
-You will be provided with:
-1. The conversattion topic.
-2. The original response from the client.
-3. The follow-up response from the client to the question 'Can you tell me more about it?'. This response is unrelated to the topic or the original response. Or sometimes, it is hard to tell if it is related to the topic or the original response. And thus needs more information or clarification from the client.
-These infromation will be provided in the format of '{"Topic": XXXX, "Original Response": XXXX, "Follow-up Response": XXXX}'
+RV_GUIDE_TOPIC_REDIRECT_TEMPLATE = (
+    "Guide: Thank you for sharing that. I want to return to the current topic, "
+    "{topic}. Could you tell me more about that?"
+)
 
-Goal:
-You need to guide the user to comeup with the valid follow-up response, which should give more details to your original response or the topic.
-You need to first express the understanding to the client's follow-up response, and then try to lead the client to the right direction.
-Don't read into the clients' mind and make too much assumptions. Try to use the phrases used by the client in your response, instead of rephrasing too much.
-Don't output any open-ended questions or invitation for follow-up to the user.
+RV_GUIDE_PROFESSIONAL_HELP = (
+    "Guide: I am concerned about your safety. This may need support from a qualified "
+    "professional. If you are in immediate danger, please call emergency services now. "
+    "If you are in the U.S., you can call or text 988 for crisis support."
+)
 
-Response format:
-Guide: xxxx
-
-Example 1:
-{"Topic": Managing mood, "Original Response": I am sad recently. "Follow-up Response": "I love to go out for movie alone."}
-Follow-up: It's good to know your habit. However, as we are discussing about the mood management now and you mentioned 'I am sad recently.', could you please tell me more about what might contribute to your sadness recently? 
-
-Example 2:
-{"Topic": Maintaining stable weight, "Original Response": My weight increased a lot recently. "Follow-up Response": I am a ISFP. I like to follow my heart.}
-Guide: It's interesting to know about your personality type. However, to better understand your situation, could you share more about how your daily routine might have affected your weight change, such as your eating habits?
-
-Example 3:
-{"Topic": Maintaining stable weight, "Original Response": My weight increased a lot recently. "Follow-up Response":  Besides that, I've been finding it hard to concentrate at work. I've been making a lot of errors and it's not like me at all. It's been stressing me out.}
-Guide: I understand that you're experiencing some difficulties at work and it's causing you stress. However, as our current discussion is about your weight loss, could you elaborate more on your recent lifestyle changes which might contribute the increase in your weight? How have these factors potentially affected your weight?
-
-Example 4:
-{"Topic": Maintaining mood, "Original Response": My mood swings a lot these days. "Follow-up Response":  The weather has been really unpredictable lately. It's been raining heavily for the past few days and then suddenly it's sunny. I really enjoy going for a walk when it's sunny outside.}
-Guide: It's interesting to hear about your observations of the weather and how you enjoy sunny weather. However, since we're discussing your mood swings, how do you think the weather change might be related to these mood fluctuations? Could you please share more about the situations or triggers that might be causing these mood swings? For instance, are there any specific events or thoughts that lead to a change in your mood?
-
-Example 5:
-{"Topic": Maintaining mood, "Original Response": I cannot control my mood. "Follow-up Response":  Apart from this, I also struggle with maintaining a regular sleep schedule. I often stay up late and feel tired the next day.}
-Guide: It seems like you're dealing with some challenges around sleep as well. However, since we're focusing on mood management at the moment, could you elaborate more on situations or triggers that make it hard for you to control your mood? Or perhaps, how your sleep schedule is influencing your mood regulation? Understanding these details could help us find useful strategies for you.
-
-Example 6:
-{"Topic": Maintaining mood, "Original Response": I cannot control my mood. "Follow-up Response":  I am a vegetarian. I made this choice when I was in college. It was a bit of a challenge at first, but now I can't imagine living any other way.}
-Guide: It's great to hear about your commitment to a vegetarian lifestyle. However, since we're focusing on understanding your mood fluctuations, could you please provide more details about when you usually feel you cannot control your mood? Are there any specific situations or triggers that make your mood out of control? Or perhaps, how your experience being a vegetarian is related to your mood regulation?
-
-'''
+_SERIOUS_RISK_PATTERN = re.compile(
+    r"("
+    r"\bkill myself\b|"
+    r"\bend my life\b|"
+    r"\bwant to die\b|"
+    r"\bsuicid(?:e|al)\b|"
+    r"\bself[-\s]?harm\b|"
+    r"\bhurt myself\b|"
+    r"\bharm myself\b|"
+    r"\boverdose\b|"
+    r"\bkill someone\b|"
+    r"\bhurt someone\b|"
+    r"\bharm others\b|"
+    r"\bhurt others\b|"
+    r"\bcan(?:not|'t) breathe\b|"
+    r"\bchest pain\b|"
+    r"\bseizure\b|"
+    r"\bstroke\b"
+    r")",
+    re.IGNORECASE,
+)
 
 # Prompt for validation: provides empathic validation and support
 RV_FOLLOW_UP_VALIDATION_SYSTEM_PROMPT = '''You are an AI assistant who has rich psychology and mental health commonsense knowledge and strong reasoning abilities.
@@ -130,11 +127,158 @@ VALIDATION: It sounds like you're going through a really challenging time. The s
 
 '''
 
-def _chat_complete(system_content: str, user_content: str):
+RV_VALIDATION_PROFESSIONAL_HELP = (
+    "VALIDATION: I am concerned about your safety. This may need support from a qualified "
+    "professional. If you are in immediate danger, please call emergency services now. "
+    "If you are in the U.S., you can call or text 988 for crisis support."
+)
+
+RV_VALIDATION_BOUNDED_SYSTEM_PROMPT = '''You are the CaiTI Reflection-Validation Validator.
+You speak to the client after the R-V Reasoner has decided their follow-up response is related to the original response/topic.
+
+Input format:
+{"Topic": XXXX, "Original Response": XXXX, "Follow-up Response": XXXX}
+
+Goal:
+Provide brief empathic validation and support using Motivational Interviewing style.
+
+Required behavior:
+1. Mirror the client's follow-up using their own words.
+2. Briefly connect it to the original response or topic.
+3. Include affective reflection only for emotion words the client explicitly stated.
+4. Include one affirmation or supportive sentence.
+
+Boundaries:
+- Do not ask questions.
+- Do not diagnose.
+- Do not provide clinical, medical, diet, exercise, medication, or treatment advice.
+- Do not propose coping strategies or action plans.
+- Do not infer unstated mood, personality, causes, or risk.
+- Do not say "you feel", "it sounds like", or "it seems like" unless the same emotion word appears in the input.
+- Do not use emotion words such as overwhelmed, anxious, depressed, sad, stressed, worried, or afraid unless that word appears in the input.
+- If no emotion is explicitly stated, use simple reflection and supportive validation without naming an emotion.
+- Keep it concise: 2-3 sentences.
+- Output ASCII only.
+
+Response format:
+VALIDATION: xxxx
+'''
+
+def parse_rv_decision(text: str, default: str = "1") -> str:
     """
-    Unified LLM entry that delegates to llm_complete.
+    Parse an R-V reasoner decision.
+    Adapter raw output is expected to be 0/1; older prompts may return DECISION: 0/1.
     """
-    return llm_complete(system_content, user_content)
+    return parse_binary_decision(text, default=default)
+
+def _format_rv_reasoner_input(topic: str, original_response: str, follow_up_response: str) -> str:
+    return json.dumps(
+        {
+            "Topic": topic,
+            "Original Response": original_response,
+            "Follow Up Response": follow_up_response,
+        }
+    )
+
+def _format_rv_validation_input(topic: str, original_response: str, follow_up_response: str) -> str:
+    return (
+        f'{{"Topic": {topic!r}, "Original Response": {original_response!r}, '
+        f'"Follow-up Response": {follow_up_response!r}}}'
+    )
+
+def _clean_redirect_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip().strip('"')
+
+_EMOTION_WORDS_REQUIRING_EXPLICIT_INPUT = (
+    "overwhelmed",
+    "anxious",
+    "depressed",
+    "sad",
+    "stressed",
+    "worried",
+    "afraid",
+)
+
+
+def _remove_unstated_emotion_sentences(sentences: list[str], source_texts: tuple[str, ...]) -> list[str]:
+    context = " ".join(str(text or "").lower() for text in source_texts)
+    if not context:
+        return sentences
+
+    kept = []
+    for sentence in sentences:
+        lower = sentence.lower()
+        has_unstated_emotion = any(
+            emotion in lower and emotion not in context
+            for emotion in _EMOTION_WORDS_REQUIRING_EXPLICIT_INPUT
+        )
+        if not has_unstated_emotion:
+            kept.append(sentence)
+    return kept
+
+
+def clean_rv_validation_text(text: str, source_texts: tuple[str, ...] = ()) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return "VALIDATION: I hear what you shared, and I appreciate you explaining more."
+
+    match = re.search(
+        r"VALIDATION:\s*(.+?)(?:\n\n|\nVALIDATION:|\nGuide:|$)",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        raw = match.group(1).strip()
+
+    hard_stops = [
+        "IMPORTANT:",
+        "INVALID:",
+        "VALID SCORE",
+        "SCORE:",
+        "Now respond",
+        "Correct -",
+        "Correct:",
+        "Note:",
+        "Follow-up RESPONSE",
+        "Output is invalid",
+    ]
+    lower = raw.lower()
+    cut = None
+    for marker in hard_stops:
+        pos = lower.find(marker.lower())
+        if pos != -1:
+            cut = pos if cut is None else min(cut, pos)
+    if cut is not None:
+        raw = raw[:cut].strip()
+
+    raw = re.sub(r"^(VALIDATION|validation)\s*:\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s+", " ", raw).strip()
+
+    question_pos = raw.find("?")
+    if question_pos != -1:
+        raw = raw[:question_pos].rstrip(". ") + "."
+
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", raw) if sentence.strip()]
+    sentences = _remove_unstated_emotion_sentences(sentences, source_texts)
+    if len(sentences) > 3:
+        sentences = sentences[:3]
+    raw = " ".join(sentences).strip()
+
+    if raw and raw[-1] not in ".!?":
+        raw += "."
+    return f"VALIDATION: {raw}" if raw else "VALIDATION: I hear what you shared, and I appreciate you explaining more."
+
+def _has_serious_risk(*texts: str) -> bool:
+    return any(_SERIOUS_RISK_PATTERN.search(str(text or "")) for text in texts)
+
+def _build_rv_guide_redirect(topic: str, original_response: str) -> str:
+    original = _clean_redirect_text(original_response)
+    if original:
+        ending = "" if original[-1] in ".!?" else "."
+        return RV_GUIDE_REDIRECT_TEMPLATE.format(original_response=original, ending=ending)
+
+    topic_text = _clean_redirect_text(topic) or "the current topic"
+    return RV_GUIDE_TOPIC_REDIRECT_TEMPLATE.format(topic=topic_text)
 
 def rv_reasoner(topic: str, original_question: str, original_response: str, follow_up_response: str) -> str:
     """
@@ -142,23 +286,93 @@ def rv_reasoner(topic: str, original_question: str, original_response: str, foll
     Returns the decision as a string.
     """
     logger.info("Running reflection validation reasoner.")
-    payload = f'{{"Topic": {topic!r}, "Original Question": {original_question!r}, "Original Response": {original_response!r}, "Follow Up Response": {follow_up_response!r}}}'
-    return _chat_complete(RV_FOLLOW_UP_SYSTEM_REASONER_PROMPT, payload)
+    payload = _format_rv_reasoner_input(topic, original_response, follow_up_response)
+    raw = llm_complete_task(
+        LLMTask.TASK3_RV_REASONER,
+        RV_FOLLOW_UP_SYSTEM_REASONER_PROMPT,
+        payload,
+        max_new_tokens=8,
+    ).text
+    contract = normalize_decision_output(raw, default="1")
+    decision = contract.decision
+    normalized = contract.normalized_output
+    log_llm_event(
+        task=LLMTask.TASK3_RV_REASONER,
+        dimension=topic,
+        score=decision,
+        segment_text=follow_up_response,
+        question_text=original_question,
+        raw_llm_output=raw,
+        normalized_output=normalized,
+        metadata={"original_response": original_response, "reasoner_payload": payload},
+    )
+    logger.debug(
+        "R-V reasoner normalized decision: %s (raw=%s, topic=%s, original_question=%s)",
+        decision,
+        raw,
+        topic,
+        original_question,
+    )
+    return normalized
 
 def rv_guide(topic: str, original_question: str, original_response: str, follow_up_response: str) -> str:
     """
-    Use the guide prompt to help the user provide a more relevant follow-up response.
-    Returns the guide as a string.
+    Redirect the user back to the original score-2 response after an invalid follow-up.
+    This module intentionally avoids clinical advice; severe risk routes to professional help.
     """
     logger.info("Running reflection validation guide.")
-    payload = f'{{"Topic": {topic!r}, "Original Question": {original_question!r}, "Original Response": {original_response!r}, "Follow-up Response": {follow_up_response!r}}}'
-    return _chat_complete(RV_FOLLOW_UP_GUIDE_SYSTEM_PROMPT, payload)
+    if _has_serious_risk(original_response, follow_up_response):
+        guide = RV_GUIDE_PROFESSIONAL_HELP
+    else:
+        guide = _build_rv_guide_redirect(topic, original_response)
+
+    log_llm_event(
+        task="rv_guide",
+        dimension=topic,
+        segment_text=follow_up_response,
+        question_text=original_question,
+        raw_llm_output=guide,
+        normalized_output=guide,
+        metadata={
+            "original_response": original_response,
+            "mode": "professional_help" if guide == RV_GUIDE_PROFESSIONAL_HELP else "redirect",
+        },
+    )
+    logger.debug("R-V guide output: %s (topic=%s, original_question=%s)", guide, topic, original_question)
+    return guide
 
 def rv_validation(topic: str, original_question: str, original_response: str, follow_up_response: str) -> str:
     """
-    Use the validation prompt to provide empathic validation and support to the user.
-    Returns the validation as a string.
+    Generate bounded affective reflection and affirmation after a valid follow-up.
+    Severe risk routes to professional help.
     """
     logger.info("Running reflection validation support/validation.")
-    payload = f'{{"Topic": {topic!r}, "Original Question": {original_question!r}, "Original Response": {original_response!r}, "Follow-up Response": {follow_up_response!r}}}'
-    return _chat_complete(RV_FOLLOW_UP_VALIDATION_SYSTEM_PROMPT, payload)
+    if _has_serious_risk(original_response, follow_up_response):
+        validation = RV_VALIDATION_PROFESSIONAL_HELP
+        raw = validation
+        mode = "professional_help"
+    else:
+        payload = _format_rv_validation_input(topic, original_response, follow_up_response)
+        raw = llm_complete(RV_VALIDATION_BOUNDED_SYSTEM_PROMPT, payload)
+        validation = clean_rv_validation_text(raw, source_texts=(original_response, follow_up_response))
+        mode = "bounded_generation"
+
+    log_llm_event(
+        task="rv_validation",
+        dimension=topic,
+        segment_text=follow_up_response,
+        question_text=original_question,
+        raw_llm_output=raw,
+        normalized_output=validation,
+        metadata={
+            "original_response": original_response,
+            "mode": mode,
+        },
+    )
+    logger.debug(
+        "R-V validation output: %s (topic=%s, original_question=%s)",
+        validation,
+        topic,
+        original_question,
+    )
+    return validation

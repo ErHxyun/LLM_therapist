@@ -1,11 +1,20 @@
 # src/response_analyzer.py
-from src.utils.llm_client import llm_complete
+import json
+
+from src.local_llm.types import LLMTask
+from src.utils.llm_client import llm_complete, llm_complete_task
+from src.utils.llm_output_contracts import (
+    CategoryContract,
+    DimScoreContract,
+    normalize_task1_output,
+    normalize_task2_output,
+)
 
 # Set up logger for this module
 from src.utils.log_util import get_logger
 logger = get_logger("ResponseAnalyzer")
 
-# === Prompt templates for OpenAI API ===
+# === Prompt templates ===
 
 # Prompt for classifying user input into dimension and score
 INIT_ASKER_SYSTEM_PROMPT_V2 = '''You are an AI assistant who has rich psychology and mental health commonsense knowledge and strong reasoning abilities.
@@ -106,6 +115,65 @@ The example user inputs with their dimensions and scores:
 {"in":"I don't have a regular schedule for sleeping.", "res": "sleep, 2"}
 '''
 
+GENERAL_RESPONSE_SYSTEM_PROMPT = '''You are an AI assistant specialized in general response classification.
+
+Your task is to classify user responses into one of the following categories.
+
+=== AVAILABLE CATEGORIES ===
+  - Maybe
+  - No
+  - Question
+  - Stop
+  - Yes
+
+Category meanings:
+- Yes: The user expressed acceptance, agreement, or affirmation
+- No: The user expressed rejection, disagreement, or negation
+- Maybe: The user expressed uncertainty, hesitation, or ambivalence
+- Question: The user expressed a question or inquiry
+- Stop: The user expressed a desire to end the conversation
+
+=== EXAMPLES ===
+Here are examples for each category:
+Example 1:
+Response: Yes, I do.
+Output: Yes
+
+Example 2:
+Response: No, I don't.
+Output: No
+
+Example 3:
+Response: Maybe, I'm not sure.
+Output: Maybe
+
+Example 4:
+Response: What do you mean?
+Output: Question
+
+Example 5:
+Response: I don't want to talk to you.
+Output: Stop
+
+=== TASK ===
+Now, classify the following response.
+
+IMPORTANT: You must respond with ONLY the category name
+- Do NOT write "Output:", "Answer:", "Result:", or any other prefix
+- Do NOT write any explanation or additional text
+- Do NOT include quotation marks
+- Just write: CategoryName
+
+Examples of correct output:
+- Yes
+- No
+- Maybe
+- Question
+- Stop
+
+Now classify the following response:
+'''
+
 # Prompt for summarizing user response in a reflective way
 REFLECTIVE_SUMMERIZER_PROMPT = ''' You are an intelligent agent to summarize what the user said.
 
@@ -166,19 +234,58 @@ def _chat_complete(system_content: str, user_content: str):
     """
     return llm_complete(system_content, user_content)
 
-def classify_dimension_and_score(user_input: str, original_question: str) -> str:
+
+def _format_task1_input(user_input: str) -> str:
+    """Match the task1 adapter's few-shot continuation format."""
+
+    return f'{{"in":{json.dumps(str(user_input))}, "res":'
+
+
+def classify_dimension_and_score_result(user_input: str, original_question: str) -> DimScoreContract:
     """
-    Classify user input into a dimension and score using the OpenAI API.
+    Classify user input into a dimension and score using the task1 adapter.
     Input: user_input (str) - any user response string.
-           original_question (str) - the original question being answered.
-    Output: Raw model text, e.g., 'weight, 2' or 'Yes, 0'.
+           original_question (str) - kept for caller context and logging.
+    Output: Raw plus normalized contract, e.g. normalized 'weight, 2'.
     """
     logger.info("Classifying user input for dimension and score.")
     logger.debug(f"Original question: {original_question}")
     logger.debug(f"User input: {user_input}")
-    # Provide both the question and the answer to improve contextual classification
-    payload = f"Question: {original_question}\nAnswer: {user_input}"
-    return _chat_complete(INIT_ASKER_SYSTEM_PROMPT_V2, payload)
+    payload = _format_task1_input(user_input)
+    raw = llm_complete_task(
+        LLMTask.TASK1_RESPONSE_ANALYZER,
+        INIT_ASKER_SYSTEM_PROMPT_V2,
+        payload,
+        max_new_tokens=16,
+    ).text
+    return normalize_task1_output(raw)
+
+def classify_dimension_and_score(user_input: str, original_question: str) -> str:
+    """
+    Return the paper-facing Response Analyzer contract: 'Dimension, Score'.
+    The raw adapter output is available through classify_dimension_and_score_result.
+    """
+    return classify_dimension_and_score_result(user_input, original_question).normalized_output
+
+def classify_general_response_result(user_input: str, default: str | None = None) -> CategoryContract:
+    """
+    Classify a short/general user response as Yes/No/Maybe/Question/Stop.
+    This uses the task2 adapter's successful plain-prompt path.
+    """
+    logger.info("Classifying general response with task2 adapter.")
+    logger.debug(f"User input: {user_input}")
+    payload = f"Response: {user_input}"
+    raw = llm_complete_task(
+        LLMTask.TASK2_GENERAL_RESPONSE,
+        GENERAL_RESPONSE_SYSTEM_PROMPT,
+        payload,
+        max_new_tokens=8,
+    ).text
+    return normalize_task2_output(raw, default=default)
+
+def classify_general_response(user_input: str) -> str:
+    """Return only the paper-facing general response category."""
+    return classify_general_response_result(user_input).normalized_output
 
 def reflective_summarizer(original_question: str, user_response: str) -> str:
     """

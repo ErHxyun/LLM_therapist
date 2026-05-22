@@ -11,6 +11,39 @@ def save_question_lib(path: str, question_lib: dict):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(question_lib, f)
 
+def _flatten_notes(notes):
+    for note in notes or []:
+        if isinstance(note, list):
+            for item in note:
+                yield str(item)
+        else:
+            yield str(note)
+
+def _format_score(score):
+    if isinstance(score, list):
+        return "; ".join(str(item) for item in score)
+    return "" if score is None else str(score)
+
+def _format_responses(notes):
+    response_prefixes = (
+        "original_resp:",
+        "followup_resp:",
+        "followup_resp_1:",
+        "CBT_unhelpful_thoughts:",
+        "CBT_challenge:",
+        "CBT_reframe:",
+    )
+    responses = []
+    for item in _flatten_notes(notes):
+        if item.startswith(response_prefixes):
+            responses.append(item.split(":", 1)[1].strip())
+    return " | ".join(response for response in responses if response)
+
+def _format_analysis(label, notes):
+    details = [f"Dimension: {label}"]
+    details.extend(_flatten_notes(notes))
+    return " | ".join(detail for detail in details if detail)
+
 def generate_results(
     question_lib: dict,
     new_response: list,
@@ -23,17 +56,18 @@ def generate_results(
     rows = []
     for i in range(1, len(question_lib) + 1):
         for ind in range(1, len(question_lib[str(i)]) + 1):
+            entry = question_lib[str(i)][str(ind)]
             rows.append([
-                question_lib[str(i)][str(ind)]["label"],
-                question_lib[str(i)][str(ind)]["score"],
-                question_lib[str(i)][str(ind)]["notes"]
+                _format_score(entry.get("score")),
+                _format_responses(entry.get("notes")),
+                _format_analysis(entry.get("label", ""), entry.get("notes")),
             ])
 
     # atomic write for report_file
     _tmp_report = report_file + ".tmp"
     with open(_tmp_report, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(['Item Label', 'Score', 'Notes'])
+        w.writerow(["Score", "Responses", "Analysis"])
         w.writerows(rows)
     os.replace(_tmp_report, report_file)
 

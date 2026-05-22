@@ -13,6 +13,10 @@ dependencies:
   - pip
   - pyyaml>=6.0.0
   - pip:
-    - openai>=1.07.3
+    - torch
+    - transformers
+    - peft
+    - accelerate
+    - bitsandbytes
     - flask-cors>=3.0.0
     - word2number>=1.1

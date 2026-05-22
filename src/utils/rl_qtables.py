@@ -46,23 +46,31 @@ def choose_action(
     With probability EPSILON, choose the best action; otherwise, explore.
     """
     logger.info(f"Choosing action for state {state}")
-    state_action = q_table.iloc[state, :]
-    # Apply mask to Q-table to disable unavailable actions
+    # Apply mask on a copy so unavailable dimensions are not erased from the learned Q-table.
     logger.debug("Mask before: [{}]".format(','.join(str(m) for m in mask)))
-    original_q_table = q_table.copy()  # For debugging/more traceable logs
-    for i in range(1, number_states):
-        q_table[str(i)] = q_table[str(i)].apply(lambda x: x * mask[i])
-    logger.debug("Q-table after masking (row {}): [{}]".format(state, ','.join(str(v) for v in q_table.iloc[state, :].values)))
-    # Exploration: with probability 1-EPSILON or if all Q-values are zero, pick randomly
-    if (np.random.uniform() > EPSILON):
+    masked_q_table = q_table.copy()
+    action_limit = min(number_states, len(actions), len(mask))
+    for i in range(1, action_limit):
+        masked_q_table[str(i)] = masked_q_table[str(i)].apply(lambda x: x * mask[i])
+    state_action = masked_q_table.iloc[state, :]
+    logger.debug("Q-table after masking (row {}): [{}]".format(state, ','.join(str(v) for v in state_action.values)))
+
+    available_actions = [actions[i] for i in range(1, action_limit) if mask[i] == 1]
+    if not available_actions:
+        terminal_action = actions[-1]
+        logger.info(f"No available screening actions. Returning terminal action {terminal_action}.")
+        return terminal_action
+
+    available_values = state_action.loc[available_actions]
+    # Exploration: with probability 1-EPSILON or if all available Q-values are zero, pick randomly.
+    if (np.random.uniform() > EPSILON) or np.all(available_values.values == 0):
         # Exploration branch: choose at random among available (not masked out) actions
-        available_actions = [actions[i] for i in range(1, number_states) if mask[i] == 1]
         logger.info(f"Exploring: choosing randomly among available actions {available_actions}")
         action = np.random.choice(available_actions)
     else:
         # Exploitation branch: choose the action(s) with the highest Q-value
-        max_value = np.max(state_action)
-        best_actions = state_action[state_action == max_value].index
+        max_value = np.max(available_values)
+        best_actions = available_values[available_values == max_value].index
         logger.info(f"Exploiting: choosing among best actions {list(best_actions)} with Q-value {max_value}")
         action = np.random.choice(best_actions)
     # Log action with human-readable label if provided

@@ -11,13 +11,14 @@ from src.utils.text_generators import (
     generate_therapist_chat,
 )
 from src.utils.llm_client import llm_complete
+from src.utils.session_event_logger import log_llm_event
 
 # Set up logger for this module
 from src.utils.log_util import get_logger
 from src.utils.io_record import get_answer, get_resp_log, log_question, set_question_prefix
 logger = get_logger("Questioner")
 
-from src.reflection_validation import rv_reasoner, rv_guide, rv_validation
+from src.reflection_validation import parse_rv_decision, rv_reasoner, rv_guide, rv_validation
 
 # System prompt for generating a retry guide when re-asking the same question.
 RETRY_GUIDE_SYSTEM_PROMPT = '''You are a concise and supportive therapist-assistant.
@@ -65,6 +66,38 @@ def retry_guide(topic: str, original_question: str, original_answer: str) -> str
     logger.info("Generating retry guide for re-ask.")
     payload = f'{{"Topic": {topic!r}, "Original Question": {original_question!r}, "Original Answer": {original_answer!r}}}'
     return _chat_complete(RETRY_GUIDE_SYSTEM_PROMPT, payload)
+
+def _is_stop_request(text: str) -> bool:
+    return "stop" in str(text or "").strip().lower()
+
+def _build_reflective_followup(original_response: str, original_question: str = "") -> str:
+    response = " ".join(str(original_response or "").split())
+    question = " ".join(str(original_question or "").split())
+    if response:
+        ending = "" if response[-1] in ".!?" else "."
+        if response.lower() in {"yes", "no"} and question:
+            return f'You said "{response}" to "{question}". Can you tell me more about that?'
+        return f'You mentioned "{response}"{ending} Can you tell me more about that?'
+    return "Can you tell me more about that?"
+
+def _log_reflective_followup(
+    *,
+    dimension: str,
+    score: int,
+    segment_text: str,
+    question_text: str,
+    followup_text: str,
+) -> None:
+    log_llm_event(
+        task="reflective_summarizer",
+        dimension=dimension,
+        score=score,
+        segment_text=segment_text,
+        question_text=question_text,
+        raw_llm_output=followup_text,
+        normalized_output=followup_text,
+        metadata={"mode": "simple_reflection"},
+    )
 
 def classify_segments(user_segments: List[str], original_question: str, dimension_label: str) -> List[Tuple[str, int]]:
     """
@@ -123,13 +156,15 @@ def _if_valid_response(
             logger.info("Appended score %s for keyword %s to question_lib[%s][%s].", str(score), str(score_norm), str(item_index), str(question_index))
 
             if score > 1:
-                text = question_lib[str(item_index)][str(question_index)]["question"][0]
-                if str(score_norm) == "Yes":
-                    text = generate_change_positive(text)
-                else:
-                    text = generate_change_negative(text)
-                followup = generate_synonymous_sentences(" Can you tell me more about it?")
-                followup_to_RV = "It seems that " + text + " " + followup
+                answer_text = user_segments[i] if i < len(user_segments) else str(score_norm)
+                followup_to_RV = _build_reflective_followup(answer_text, original_question)
+                _log_reflective_followup(
+                    dimension=question_label,
+                    score=score,
+                    segment_text=answer_text,
+                    question_text=original_question,
+                    followup_text=followup_to_RV,
+                )
 
             # Prepare note for follow-up, to be appended by caller after collecting follow-up
             original_resp = "original_resp: " + (user_segments[i] if i < len(user_segments) else user_segments[0])
@@ -146,8 +181,15 @@ def _if_valid_response(
             logger.info("Valid response: label matches and score is in [0,1,2]")
             question_lib[str(item_index)][str(question_index)]["score"].append(score_norm)
             if score_norm > 1:
-                text = generate_change(user_segments[i]).lower() if i < len(user_segments) else ''
-                followup_to_RV = "You mentioned that " + text + " Can you tell me more?"
+                answer_text = user_segments[i] if i < len(user_segments) else ""
+                followup_to_RV = _build_reflective_followup(answer_text, original_question)
+                _log_reflective_followup(
+                    dimension=question_label,
+                    score=score_norm,
+                    segment_text=answer_text,
+                    question_text=original_question,
+                    followup_text=followup_to_RV,
+                )
             # Prepare note
             original_resp = "original_resp: " + (user_segments[i] if i < len(user_segments) else user_segments[0])
             note_resp = [
@@ -193,28 +235,39 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
         topic = question_lib[str(S)][str(question_A)]["label"]
         original_resp = user_input[0] if user_input else ""
 
-        logger.info(f"Running ReflectionValidation reasoner for topic '{topic}'.")
-        rv_decision_raw = rv_reasoner(topic, original_question_asked, original_resp, user_response)
-        # Simple parsing: extract '0/1', 0 means related, 1 means not related
-        rv_decision_token = "0" if "0" in rv_decision_raw else "1"
-        logger.info(f"ReflectionValidation decision: {rv_decision_token}")
+        rv_decision_token = "1"
+        rv_decision_raws = []
+        rv_guide_texts = []
+        followup_responses = [user_response]
+        rv_stopped = _is_stop_request(user_response)
 
-        # If not related (1), give guidance, recollect follow-up
-        rv_guide_text = ""
-        user_response_0 = ""
-        if rv_decision_token == "1":
+        while not rv_stopped:
+            logger.info(f"Running ReflectionValidation reasoner for topic '{topic}'.")
+            rv_decision_raw = rv_reasoner(topic, original_question_asked, original_resp, user_response)
+            rv_decision_raws.append(str(rv_decision_raw))
+            # 0 means related/valid; 1 means unrelated/invalid.
+            rv_decision_token = parse_rv_decision(rv_decision_raw, default="1")
+            logger.info(f"ReflectionValidation decision: {rv_decision_token}")
+
+            if rv_decision_token == "0":
+                break
+
             logger.info("Follow-up not related, generating guidance and recollecting follow-up.")
-            user_response_0 = user_response
             rv_guide_text = rv_guide(topic, original_question_asked, original_resp, user_response)
+            rv_guide_texts.append(rv_guide_text)
             log_question(rv_guide_text)
             user_response = get_resp_log()
+            followup_responses.append(user_response)
+            rv_stopped = _is_stop_request(user_response)
 
-        # Empathic validation
-        logger.info("Running ReflectionValidation empathic validation.")
-        rv_validation_text = rv_validation(topic, original_question_asked, original_resp, user_response)
-        # Set validation text to be prepended to the next user-facing question
-        set_question_prefix(rv_validation_text)
-        logger.info("Queued RV validation to prepend before next question output.")
+        rv_validation_text = ""
+        if rv_decision_token == "0" and not rv_stopped:
+            # Empathic validation happens only after the Reasoner accepts the follow-up.
+            logger.info("Running ReflectionValidation empathic validation.")
+            rv_validation_text = rv_validation(topic, original_question_asked, original_resp, user_response)
+            # Set validation text to be prepended to the next user-facing question
+            set_question_prefix(rv_validation_text)
+            logger.info("Queued RV validation to prepend before next question output.")
         
         # Skip generating therapist response to avoid unnecessary LLM calls
         therapist_resp = ""
@@ -224,14 +277,19 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
         note_resp = [
             "original_question: " + original_question_asked,
             "original_resp: " + (user_input[0] if user_input else ""),
-            "followup_resp: " + user_response_0 if user_response_0 else "followup_resp: " + user_response,
+            "followup_resp: " + (followup_responses[0] if followup_responses else ""),
             "rv_decision: " + rv_decision_token,
-            ("rv_guide: " + rv_guide_text) if rv_guide_text else "rv_guide: ",
-            "followup_resp_1: " + user_response if user_response_0 else "followup_resp_1: "
+            "rv_decision_raw: " + " | ".join(rv_decision_raws),
+            "rv_guide: " + " | ".join(rv_guide_texts),
+            "followup_resp_1: " + (followup_responses[-1] if len(followup_responses) > 1 else ""),
             "rv_validation: " + rv_validation_text,
             "therapist_resp: " + therapist_resp
         ]
         question_lib[str(S)][str(question_A)]["notes"].append(note_resp)
+
+        if rv_stopped:
+            logger.info("User requested stop during ReflectionValidation.")
+            return valid, 1, previous_question, question_lib
         
     return valid, terminate, previous_question, question_lib
 
