@@ -14,6 +14,20 @@ from src.utils.llm_output_contracts import (
 from src.utils.session_event_logger import log_llm_event
 logger = get_logger("ResponseBridge")
 
+_EXPLICIT_STOP_PATTERN = re.compile(
+    r"("
+    r"\b(let us|let's)\s+stop\b|"
+    r"\bstop\s+(here|this|now|the conversation|the session)\b|"
+    r"\bend\s+(the|this)\s+(conversation|session)\b|"
+    r"\bno more questions\b|"
+    r"\bi\s+(want|would like|need)\s+to\s+stop\b|"
+    r"\bi\s+(do not|don't)\s+want\s+to\s+(continue|answer)\b|"
+    r"\bi\s+(do not|don't)\s+want\s+to\s+talk\s+(anymore|about\s+(this|it)|to\s+you|with\s+you)\b|"
+    r"\bplease\s+stop\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _normalize_general_text(text: str) -> str:
     s = str(text or "").strip().lower()
@@ -24,6 +38,33 @@ def _normalize_general_text(text: str) -> str:
 
 def _strip_outer_punctuation(text: str) -> str:
     return re.sub(r"^[\W_]+|[\W_]+$", "", text).strip()
+
+
+def _contextual_general_label(user_input: str, dimension_label: str) -> str | None:
+    s = _normalize_general_text(user_input)
+    dim = str(dimension_label or "").strip().lower()
+
+    if dim in {"work", "showup"} and re.search(
+        r"\b(no|not|never|haven't|have not|didn't|did not)\s+"
+        r"(miss|missed|missing|skip|skipped|absent)\b",
+        s,
+    ):
+        return "Yes"
+    if dim in {"work", "showup"} and re.search(
+        r"\b(no|zero)\s+(missed\s+)?(days|classes|workdays|appointments)\b",
+        s,
+    ):
+        return "Yes"
+
+    return None
+
+
+def is_explicit_stop_request(text: str) -> bool:
+    s = _normalize_general_text(text)
+    bare = _strip_outer_punctuation(s)
+    if bare in {"stop", "quit", "exit", "cancel"}:
+        return True
+    return bool(_EXPLICIT_STOP_PATTERN.search(s))
 
 
 def _heuristic_general_label(user_input: str) -> str | None:
@@ -39,7 +80,8 @@ def _heuristic_general_label(user_input: str) -> str | None:
     exact_no = {
         "no", "nope", "nah", "no i don't", "no i do not", "no i didn't",
         "no i did not", "not really", "not exactly", "i don't", "i do not",
-        "i didn't", "i did not",
+        "i didn't", "i did not", "i don't think so", "i do not think so",
+        "don't think so", "do not think so", "not at all", "none", "nothing",
     }
     exact_maybe = {
         "maybe", "perhaps", "possibly", "it depends", "as usual",
@@ -57,13 +99,10 @@ def _heuristic_general_label(user_input: str) -> str | None:
         return "Yes"
     if re.match(r"^(no|nope|nah)\b", bare) and len(words) <= 8:
         return "No"
+    if re.search(r"\b(i\s+)?do(?:n't| not)\s+think\s+so\b", bare) and len(words) <= 10:
+        return "No"
 
-    if any(phrase in s for phrase in (
-        "let us stop", "let's stop", "stop here", "stop this",
-        "end the conversation", "end this conversation", "no more questions",
-        "i want to stop", "i don't want to continue", "i do not want to continue",
-        "i don't want to answer", "i do not want to answer",
-    )):
+    if is_explicit_stop_request(user_input):
         return "Stop"
 
     if any(phrase in s for phrase in (
@@ -85,8 +124,30 @@ def _heuristic_general_label(user_input: str) -> str | None:
     return None
 
 
+def _strong_general_label(user_input: str) -> str | None:
+    s = _normalize_general_text(user_input)
+    bare = _strip_outer_punctuation(s)
+    if not bare:
+        return None
+
+    if re.match(r"^(yes|yeah|yep|yup)\b", bare):
+        conflict = re.search(
+            r"\b(but|however|although|not|no|never|haven't|hasn't|don't|didn't|can't|cannot)\b",
+            bare,
+        )
+        return None if conflict else "Yes"
+
+    if re.match(r"^(no|nope|nah)\b", bare):
+        conflict = re.search(r"\b(but|however|although|actually yes)\b", bare)
+        return None if conflict else "No"
+    if re.match(r"^(so\s+)?(i\s+)?do(?:n't| not)\s+think\s+so\b", bare):
+        return "No"
+
+    return None
+
+
 def _looks_like_general_response(user_input: str) -> bool:
-    return _heuristic_general_label(user_input) is not None
+    return _heuristic_general_label(user_input) is not None or _strong_general_label(user_input) is not None
 
 
 def _parse_task2_prediction(
@@ -127,8 +188,73 @@ def _parse_from_json_like(raw: str):
     return _contract_parse_from_json_like(raw)
 
 
+def _task1_fallback(
+    *,
+    user_input: str,
+    original_question: str,
+    raw: str | None,
+    source: str,
+    dimension_label: str,
+    **metadata,
+):
+    log_llm_event(
+        task=LLMTask.TASK1_RESPONSE_ANALYZER,
+        dimension="NA",
+        score=99,
+        segment_text=user_input,
+        question_text=original_question,
+        raw_llm_output=raw,
+        normalized_output="NA, 99",
+        metadata={"source": source, "current_dimension": dimension_label, **metadata},
+    )
+    return "NA", 99
+
+
+def _task1_dimension_result(
+    *,
+    dim: str,
+    score: int,
+    user_input: str,
+    original_question: str,
+    raw: str | None,
+    source: str,
+    dimension_label: str,
+):
+    if str(dim).strip().lower() != str(dimension_label).strip().lower():
+        logger.info(
+            "Task1 dimension guard rejected %s,%s for current dimension %s.",
+            dim,
+            score,
+            dimension_label,
+        )
+        return _task1_fallback(
+            user_input=user_input,
+            original_question=original_question,
+            raw=raw,
+            source="dimension_guard",
+            dimension_label=dimension_label,
+            rejected_dimension=dim,
+            rejected_score=score,
+            rejected_source=source,
+        )
+
+    log_llm_event(
+        task=LLMTask.TASK1_RESPONSE_ANALYZER,
+        dimension=dim,
+        score=score,
+        segment_text=user_input,
+        question_text=original_question,
+        raw_llm_output=raw,
+        normalized_output=f"{dim}, {score}",
+        metadata={"source": source, "current_dimension": dimension_label},
+    )
+    return dim, score
+
+
 def classify_with_task2(user_input: str, dimension_label: str):
-    heuristic_default = _heuristic_general_label(user_input)
+    contextual_default = _contextual_general_label(user_input, dimension_label)
+    heuristic_default = contextual_default or _heuristic_general_label(user_input)
+    strong_default = None if contextual_default else _strong_general_label(user_input)
     raw = None
     model_error = None
     category = None
@@ -142,6 +268,27 @@ def classify_with_task2(user_input: str, dimension_label: str):
         logger.debug(f"classify_general_response exception: {e}")
 
     if category:
+        if contextual_default and category != contextual_default:
+            logger.info(
+                "Overriding task2 category %s with contextual heuristic %s.",
+                category,
+                contextual_default,
+            )
+            category = contextual_default
+        if category == "Stop" and not is_explicit_stop_request(user_input):
+            logger.info("Stop guard rejected task2 Stop for non-explicit user text.")
+            category = strong_default or heuristic_default
+            if category == "Stop":
+                category = None
+            if not category:
+                return None
+        if strong_default and category != strong_default:
+            logger.info(
+                "Overriding task2 category %s with strong user-language heuristic %s.",
+                category,
+                strong_default,
+            )
+            category = strong_default
         logger.debug(f"Task2 category '{category}' detected; binding to dimension '{dimension_label}'")
         log_llm_event(
             task=LLMTask.TASK2_GENERAL_RESPONSE,
@@ -150,26 +297,32 @@ def classify_with_task2(user_input: str, dimension_label: str):
             segment_text=user_input,
             raw_llm_output=raw,
             normalized_output=f"{dimension_label}, {category}",
-            metadata={"heuristic_default": heuristic_default},
+            metadata={
+                "contextual_default": contextual_default,
+                "heuristic_default": heuristic_default,
+                "strong_default": strong_default,
+            },
         )
         return dimension_label, category
 
-    if heuristic_default:
-        logger.debug(f"Task2 fallback heuristic '{heuristic_default}' used; binding to dimension '{dimension_label}'")
+    fallback = strong_default or heuristic_default
+    if fallback:
+        logger.debug(f"Task2 fallback heuristic '{fallback}' used; binding to dimension '{dimension_label}'")
         log_llm_event(
             task=LLMTask.TASK2_GENERAL_RESPONSE,
             dimension=dimension_label,
-            score=heuristic_default,
+            score=fallback,
             segment_text=user_input,
             raw_llm_output=raw,
-            normalized_output=f"{dimension_label}, {heuristic_default}",
+            normalized_output=f"{dimension_label}, {fallback}",
             metadata={
                 "heuristic_default": heuristic_default,
+                "strong_default": strong_default,
                 "model_error": str(model_error) if model_error else None,
                 "source": "heuristic_fallback",
             },
         )
-        return dimension_label, heuristic_default
+        return dimension_label, fallback
     return None
 
 
@@ -196,21 +349,28 @@ def get_openai_resp(user_input, original_question, dimension_label: str):
     except Exception as e:
         # Log failure for diagnostics, fallback code
         logger.debug(f"classify_dimension_and_score exception: {e}")
-        log_llm_event(
-            task=LLMTask.TASK1_RESPONSE_ANALYZER,
-            dimension=dimension_label,
-            score=99,
-            segment_text=user_input,
-            question_text=original_question,
-            raw_llm_output=None,
-            normalized_output="NA, 99",
-            metadata={"model_error": str(e)},
+        return _task1_fallback(
+            user_input=user_input,
+            original_question=original_question,
+            raw=None,
+            source="model_error",
+            dimension_label=dimension_label,
+            model_error=str(e),
         )
-        return "NA", 99
 
     # Some response-analyzer outputs still surface general labels directly.
     category = _parse_task2_prediction(first, allow_numeric=False)
     if category:
+        if category == "Stop" and not is_explicit_stop_request(user_input):
+            logger.info("Stop guard rejected task1 Stop for non-explicit user text.")
+            return _task1_fallback(
+                user_input=user_input,
+                original_question=original_question,
+                raw=raw,
+                source="stop_guard",
+                dimension_label=dimension_label,
+                rejected_category=category,
+            )
         logger.debug(f"General token '{category}' detected; binding to dimension '{dimension_label}'")
         log_llm_event(
             task=LLMTask.TASK1_RESPONSE_ANALYZER,
@@ -225,33 +385,29 @@ def get_openai_resp(user_input, original_question, dimension_label: str):
         return dimension_label, category
 
     if contract.is_valid:
-        log_llm_event(
-            task=LLMTask.TASK1_RESPONSE_ANALYZER,
-            dimension=contract.dimension,
+        return _task1_dimension_result(
+            dim=contract.dimension,
             score=contract.score,
-            segment_text=user_input,
-            question_text=original_question,
-            raw_llm_output=raw,
-            normalized_output=contract.normalized_output,
-            metadata={"source": contract.source, "current_dimension": dimension_label},
+            user_input=user_input,
+            original_question=original_question,
+            raw=raw,
+            source=contract.source,
+            dimension_label=dimension_label,
         )
-        return contract.dimension, contract.score
 
     # Maybe it's a plain-text dimension,score (e.g. 'talk, 1' or '3_talk, 1').
     got = _parse_dim_score_from_text(first)
     logger.debug(f"Parsed from text: {got}")
     if got:
-        log_llm_event(
-            task=LLMTask.TASK1_RESPONSE_ANALYZER,
-            dimension=got[0],
+        return _task1_dimension_result(
+            dim=got[0],
             score=got[1],
-            segment_text=user_input,
-            question_text=original_question,
-            raw_llm_output=raw,
-            normalized_output=f"{got[0]}, {got[1]}",
-            metadata={"source": "text_parse", "current_dimension": dimension_label},
+            user_input=user_input,
+            original_question=original_question,
+            raw=raw,
+            source="text_parse",
+            dimension_label=dimension_label,
         )
-        return got
     
     # Try to parse result in case it's JSON-ish (either first line or whole raw)
     got = _parse_from_json_like(first)
@@ -260,44 +416,34 @@ def get_openai_resp(user_input, original_question, dimension_label: str):
         got = _parse_from_json_like(str(raw))
         logger.debug(f"Parsed whole raw answer from json-like: {got}")
     if got:
-        log_llm_event(
-            task=LLMTask.TASK1_RESPONSE_ANALYZER,
-            dimension=got[0],
+        return _task1_dimension_result(
+            dim=got[0],
             score=got[1],
-            segment_text=user_input,
-            question_text=original_question,
-            raw_llm_output=raw,
-            normalized_output=f"{got[0]}, {got[1]}",
-            metadata={"source": "json_like_parse", "current_dimension": dimension_label},
+            user_input=user_input,
+            original_question=original_question,
+            raw=raw,
+            source="json_like_parse",
+            dimension_label=dimension_label,
         )
-        return got
 
     # If response is 'Other, N', always fallback to NA,99
     m = re.match(r"^\s*(Other)\s*,\s*(\d+)\s*$", first, flags=re.IGNORECASE)
     if m:
         logger.debug(f"Response is 'Other, {m.group(2)}', fallback to NA,99")
-        log_llm_event(
-            task=LLMTask.TASK1_RESPONSE_ANALYZER,
-            dimension="NA",
-            score=99,
-            segment_text=user_input,
-            question_text=original_question,
-            raw_llm_output=raw,
-            normalized_output="NA, 99",
-            metadata={"source": "other_fallback", "current_dimension": dimension_label},
+        return _task1_fallback(
+            user_input=user_input,
+            original_question=original_question,
+            raw=raw,
+            source="other_fallback",
+            dimension_label=dimension_label,
         )
-        return "NA", 99
 
     # If all else fails, fallback
     logger.debug("Failed to parse classification, fallback to NA,99")
-    log_llm_event(
-        task=LLMTask.TASK1_RESPONSE_ANALYZER,
-        dimension="NA",
-        score=99,
-        segment_text=user_input,
-        question_text=original_question,
-        raw_llm_output=raw,
-        normalized_output="NA, 99",
-        metadata={"source": "parse_failure", "current_dimension": dimension_label},
+    return _task1_fallback(
+        user_input=user_input,
+        original_question=original_question,
+        raw=raw,
+        source="parse_failure",
+        dimension_label=dimension_label,
     )
-    return "NA", 99

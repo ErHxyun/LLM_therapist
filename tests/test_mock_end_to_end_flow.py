@@ -85,6 +85,7 @@ class MockEndToEndFlowTest(unittest.TestCase):
             "questioner.set_question_prefix": questioner.set_question_prefix,
             "CBT.get_resp_log": CBT.get_resp_log,
             "CBT.log_question": CBT.log_question,
+            "CBT.log_system_message": CBT.log_system_message,
             "CBT.set_question_prefix": CBT.set_question_prefix,
             "CBT.llm_complete_task": CBT.llm_complete_task,
             "CBT.recap_stage3_challenge": CBT.recap_stage3_challenge,
@@ -131,6 +132,7 @@ class MockEndToEndFlowTest(unittest.TestCase):
 
             CBT.get_resp_log = lambda: next(cbt_responses)
             CBT.log_question = lambda text: logged_questions.append(text)
+            CBT.log_system_message = lambda text: logged_questions.append(text)
             CBT.set_question_prefix = lambda text: prefixes.append(text)
             CBT.llm_complete_task = fake_cbt_complete_task
             CBT.recap_stage3_challenge = lambda *_args: "You challenged the thought by naming another possibility."
@@ -150,6 +152,7 @@ class MockEndToEndFlowTest(unittest.TestCase):
             questioner.set_question_prefix = originals["questioner.set_question_prefix"]
             CBT.get_resp_log = originals["CBT.get_resp_log"]
             CBT.log_question = originals["CBT.log_question"]
+            CBT.log_system_message = originals["CBT.log_system_message"]
             CBT.set_question_prefix = originals["CBT.set_question_prefix"]
             CBT.llm_complete_task = originals["CBT.llm_complete_task"]
             CBT.recap_stage3_challenge = originals["CBT.recap_stage3_challenge"]

@@ -9,41 +9,119 @@ logger = get_logger("TextGenerators")
 
 def generate_prompt_synonymous_sentences(user_input):
     """
-    Generate a prompt for the model to create synonymous sentences.
-    The prompt provides several examples and then asks the model to generate a synonym for the user's input.
-    """
-    return """Generate synonymous sentences.
+    Generate a prompt for the model to rephrase a screening question.
 
-    User: I am sad.
-    Answer: I feel sad.
-    User: I really enjoy my work recently.
-    Answer: I like my job a lot those days.
-    User: I have problem hearing you well.
-    Answer: I have problem understand you well.
-    User:{}
-    Answer:""".format(
-        user_input.capitalize()
+    This must preserve question form because the output is spoken directly to
+    the user by the voice shell.
+    """
+    return """Rephrase the screening question while preserving its meaning.
+
+Rules:
+- Return one question only.
+- Keep it as a question ending in a question mark.
+- Do not answer the question.
+- Do not add labels, prefixes, examples, arrows, or explanations.
+
+Question: Have you experienced significant weight change recently?
+Rephrased question: Have you noticed any significant changes in your weight recently?
+Question: How has your mood been? Have you been able to manage your moods?
+Rephrased question: How has your mood been lately, and have you been able to manage it?
+Question: How's your eating? Are you eating regularly?
+Rephrased question: How have your eating habits been, and have you been eating regularly?
+Question: {}
+Rephrased question:""".format(
+        str(user_input).strip()
     )
+
+def _strip_rewrite_prefix(text: str) -> str:
+    candidate = str(text or "").strip().strip("\"'")
+    prefixes = (
+        "answer:",
+        "rephrased question:",
+        "question:",
+        "output:",
+        "rewrite:",
+        "rewritten question:",
+    )
+    changed = True
+    while changed:
+        changed = False
+        lowered = candidate.lower().lstrip()
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                candidate = candidate.lstrip()[len(prefix):].strip().strip("\"'")
+                changed = True
+                break
+    return candidate
+
+def clean_question_rewrite(raw: str) -> str:
+    """
+    Extract the first plausible user-facing question from model output.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    candidate = lines[0] if lines else text
+    if "=>" in candidate:
+        candidate = candidate.split("=>", 1)[0].strip()
+    candidate = _strip_rewrite_prefix(candidate)
+
+    if "?" in candidate:
+        candidate = candidate[: candidate.find("?") + 1]
+    return " ".join(candidate.split()).strip()
+
+def is_valid_question_rewrite(candidate: str) -> bool:
+    """
+    Reject rewrite artifacts that would turn a screening question into an answer.
+    """
+    text = " ".join(str(candidate or "").split()).strip()
+    if not text or "?" not in text:
+        return False
+    lowered = text.lower()
+    forbidden_fragments = (
+        "=>",
+        "answer:",
+        "user:",
+        "rephrased question:",
+        "output:",
+    )
+    if any(fragment in lowered for fragment in forbidden_fragments):
+        return False
+    answer_starts = (
+        "i am ",
+        "i'm ",
+        "i have ",
+        "i haven't ",
+        "i do ",
+        "i don't ",
+        "my ",
+        "we ",
+    )
+    if lowered.startswith(answer_starts):
+        return False
+    return True
 
 def generate_synonymous_sentences(question_text):
     """
-    Use OpenAI API to generate a synonymous sentence for the given question_text.
+    Generate a safe paraphrase for a question, falling back to the original.
     """
-    user_input = question_text
+    original_question = " ".join(str(question_text or "").split()).strip()
     
     raw = llm_complete(
-        "You generate synonymous sentences for a given text. Return only the rewritten sentence, without any prefixes.",
-        generate_prompt_synonymous_sentences(user_input)
+        "You rephrase screening questions. Return exactly one question and nothing else.",
+        generate_prompt_synonymous_sentences(original_question)
     )
-    results = raw.strip()
-    lower = results.lower()
-    if "answer:" in lower:
-        idx = lower.rfind("answer:")
-        results = results[idx+7:].strip()
-    elif results.startswith("User:"):
-        parts = [ln for ln in results.splitlines() if ln.strip().lower().startswith("answer:")]
-        if parts:
-            results = parts[-1].split(":", 1)[1].strip()
+    results = clean_question_rewrite(raw)
+    if not is_valid_question_rewrite(results):
+        logger.warning(
+            "Question rewrite rejected; falling back to original. raw=%r cleaned=%r original=%r",
+            raw,
+            results,
+            original_question,
+        )
+        results = original_question
     logger.info(f"generate_synonymous_sentences: {results}")
     return results
 

@@ -71,28 +71,33 @@ def generate_results(
         w.writerows(rows)
     os.replace(_tmp_report, report_file)
 
+    note_fields = [
+        "Item",
+        "Question",
+        "Original_question",
+        "DLA_result",
+        "User_input",
+        "Score",
+        "Reward",
+        "User_comment",
+    ]
     rows_new = []
     for rec in new_response:
-        try:
-            rows_new.append([
-                rec["item"],
-                rec["question"],
-                rec["DLA_result"],
-                rec["User_input"],
-                rec["User_comment"]
-            ])
-        except:
-            rows_new.append([
-                rec["item"],
-                rec["question"],
-                rec["DLA_result"],
-                rec["User_input"]
-            ])
+        rows_new.append([
+            rec.get("item", ""),
+            rec.get("question", ""),
+            rec.get("Original_question", rec.get("original_question", "")),
+            rec.get("DLA_result", ""),
+            rec.get("User_input", ""),
+            rec.get("Score", ""),
+            rec.get("Reward", ""),
+            rec.get("User_comment", ""),
+        ])
 
     # atomic write for notes_file
     _tmp_notes = notes_file + ".tmp"
     with open(_tmp_notes, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(['Item', "question", "Original_question", "DLA_result", "User_input", "User_comment"])
+        w.writerow(note_fields)
         w.writerows(rows_new)
     os.replace(_tmp_notes, notes_file)

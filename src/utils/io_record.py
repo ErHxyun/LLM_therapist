@@ -10,6 +10,7 @@ from src.utils.log_util import get_logger
 logger = get_logger("IORecord")
 
 HEADER = ["Question", "Question_Lock", "Resp", "Resp_Lock"]
+NO_RESPONSE_PREFIX = "__CAITI_NO_RESPONSE__"
 
 # Module-level buffer to prepend content to the next question output.
 # When non-empty, its content will be combined with the next question
@@ -45,7 +46,7 @@ def _write(df):
     os.replace(tmp_path, RECORD_CSV)
     time.sleep(0.03)
 
-def log_question(text: str):
+def _log_question_record(text: str, expects_response: bool):
     while True:
         time.sleep(0.1)
         data = _read()
@@ -56,6 +57,8 @@ def log_question(text: str):
             if _PENDING_QUESTION_PREFIX:
                 combined = f"{_PENDING_QUESTION_PREFIX}\n\n{text}"
                 logger.info("Combining pending prefix with next question using two newlines.")
+            if not expects_response:
+                combined = f"{NO_RESPONSE_PREFIX}\n{combined}"
             data.loc[0, "Question"] = combined
             data.loc[0, "Question_Lock"] = 1
             _write(data)
@@ -63,6 +66,15 @@ def log_question(text: str):
             _PENDING_QUESTION_PREFIX = ""
             logger.info(f"Prompted question: {combined}")
             break
+
+
+def log_question(text: str):
+    _log_question_record(text, expects_response=True)
+
+
+def log_system_message(text: str):
+    """Log a user-facing message that should be spoken without collecting STT."""
+    _log_question_record(text, expects_response=False)
 
 def get_answer():
     while True:
@@ -85,8 +97,11 @@ def get_answer():
         segments.append(seg)
     return DLA_result, segments
 
-def get_resp_log():
+def get_resp_log(should_stop=None):
     while True:
+        if callable(should_stop) and should_stop():
+            logger.info("Stopped waiting for user response because stop condition was met.")
+            return ""
         time.sleep(0.1)
         data = _read()
         if data.loc[0, "Resp_Lock"] == 0:
@@ -107,5 +122,3 @@ def init_record():
     data.loc[0, 'Question_Lock'] = 0
     data.loc[0, 'Resp_Lock'] = 1
     _write(data)
-
-

@@ -18,3 +18,10 @@ src/tools/
 
 _archive/
 # data/
+
+# Local speech/model assets can be large. Keep them on-device, not in git.
+models/piper/*.onnx
+models/piper/*.onnx.json
+assets/audio/*.wav
+assets/audio/*.mp3
+!assets/audio/.gitkeep

@@ -7,6 +7,7 @@ import pandas as pd
 
 from src.questioner import ask_question
 from src.CBT import run_cbt
+from src.session.control import NullSessionControl
 from src.utils.config_loader import (
     ITEM_N_STATES,
     GAMMA,
@@ -14,19 +15,36 @@ from src.utils.config_loader import (
     QUESTION_LIB_FILENAME,
     SUBJECT_ID,
     DATA_DIR,
+    RESULT_DIR,
+    REPORT_FILE,
+    NOTES_FILE,
 )
 from src.utils.config_loader import RECORD_CSV
 from src.utils.io_question_lib import load_question_lib, save_question_lib, generate_results
-from src.utils.io_record import init_record, log_question, set_question_prefix
+from src.utils.io_record import init_record, log_question, log_system_message, set_question_prefix
 from src.utils.rl_qtables import (
     initialize_q_table,
     choose_action,
     get_env_feedback,
 )
+from src.utils.session_records import (
+    build_rl_trace_path,
+    build_session_summary_path,
+    cbt_candidates_from_question_lib,
+    make_run_id,
+    now_iso,
+    write_rl_trace,
+    write_session_summary,
+)
 # Set up logger for this module
 from src.utils.log_util import get_logger
 from src.utils.llm_client import llm_complete
 logger = get_logger("HandlerRL")
+
+OPENING_GREETING = (
+    "Hello, I am Caiti, your AI therapist. Thank you for joining me today. "
+    "Let's get started with a couple of questions about your recent daily life."
+)
 
 class HandlerRL:
     """
@@ -35,7 +53,7 @@ class HandlerRL:
     All file I/O is performed via utility modules.
     """
 
-    def __init__(self):
+    def __init__(self, session_control=None):
         # Stores the last question asked to the user
         self.last_question: str = " "
         # Stores all user responses for later result generation
@@ -46,6 +64,12 @@ class HandlerRL:
         self.item_q_table = None
         # Action id -> label mapping for logging readability
         self.item_action_labels = {}
+        self.session_control = session_control or NullSessionControl()
+        self.run_id = make_run_id(SUBJECT_ID)
+        self.rl_trace_records = []
+        self.rl_trace_file = build_rl_trace_path(RESULT_DIR, SUBJECT_ID, self.run_id)
+        self.session_summary_file = build_session_summary_path(RESULT_DIR, SUBJECT_ID, self.run_id)
+        self.q_table_file = os.path.join(DATA_DIR, "q_tables", f"item_qtable_{SUBJECT_ID}.csv")
 
     def setup(self):
         """
@@ -81,7 +105,7 @@ class HandlerRL:
   
         # Load persistent Q tables (if exist)
         qdir = os.path.join(DATA_DIR, "q_tables")
-        qfile = os.path.join(qdir, f"item_qtable_{SUBJECT_ID}.csv")
+        qfile = self.q_table_file
         if os.path.exists(qfile):
             loaded_q_table = pd.read_csv(qfile, index_col=0)
             expected_columns = list(self.item_q_table.columns)
@@ -111,28 +135,10 @@ class HandlerRL:
         logger.info("Starting main RL screening process.")
         self.setup()
 
-        # Opening greeting (LLM-rewritten) delivered before the first question for all interfaces
-        try:
-            greeting_raw = (
-                "Hello, I'm CaiTI, your intelligence therapist. Thank you for joining me today. "
-                "Let's get started with a couple of questions about your recent daily life."
-            )
-            rewrite_system_prompt = (
-                "You are a warm, concise, and professional therapist-assistant.\n\n"
-                "Task: Given an opening greeting, rewrite it to sound supportive, welcoming, and clear, "
-                "suitable for the very first message of a therapeutic screening conversation.\n\nRules:\n"
-                "- 1–2 short sentences.\n- Friendly, non-judgmental tone.\n"
-                "- No extra headers or labels; output the final greeting directly.\n"
-            )
-            greeting = llm_complete(rewrite_system_prompt, greeting_raw).strip()
-            # Use greeting as a prefix so the first substantive question appears immediately
-            set_question_prefix(greeting)
-            time.sleep(0.5)
-        except Exception as e:
-            # If LLM call fails, fall back to raw greeting prefix without blocking the flow
-            logger.warning(f"Opening greeting rewrite failed: {e}")
-            set_question_prefix(greeting_raw)
-            time.sleep(0.5)
+        # Opening greeting is deterministic so it cannot be rewritten into
+        # "Hello CaiTI" or delay the first real screening question.
+        set_question_prefix(OPENING_GREETING)
+        time.sleep(0.5)
         new_q_table = self.item_q_table.copy()
         S = 0  # Start state for item RL
         is_terminated = False
@@ -140,6 +146,11 @@ class HandlerRL:
         # Mask for available actions: START and END are states, not screening dimensions to ask.
         item_mask = [0] + [1] * dimension_count + [0]
         while not is_terminated:
+            control_action = self.session_control.checkpoint("screening")
+            if control_action == "skip_to_cbt":
+                is_terminated = True
+                logger.info("Session button requested skipping screening and proceeding to CBT.")
+                break
             # If all items have been asked, exit to CBT directly
             if sum(item_mask) == 0:
                 is_terminated = True
@@ -154,7 +165,14 @@ class HandlerRL:
             # Mark this item as used
             item_mask[int(A)] = 0
             # Ask questions for the selected item
-            openai_res, DLA_terminate, last_question_updated = ask_question(self.question_lib, int(A))
+            turn_start = len(self.new_response)
+            openai_res, DLA_terminate, last_question_updated = ask_question(
+                self.question_lib,
+                int(A),
+                turn_records=self.new_response,
+            )
+            action_turn_records = self.new_response[turn_start:]
+            primary_turn = action_turn_records[-1] if action_turn_records else {}
             self.last_question = last_question_updated
             # Get next state and reward for item RL
             S_, R = get_env_feedback(S, A, openai_res, DLA_terminate, item_mask)
@@ -166,8 +184,36 @@ class HandlerRL:
                 q_target = R
                 is_terminated = True
             new_q_table.loc[S, A] += ALPHA * (q_target - q_predict)
+            q_after = new_q_table.loc[S, A]
+            trace_record = {
+                "RunID": self.run_id,
+                "SubjectID": SUBJECT_ID,
+                "Step": len(self.rl_trace_records) + 1,
+                "Timestamp": now_iso(),
+                "State": S,
+                "Action": A,
+                "NextState": S_,
+                "Dimension": self.item_action_labels.get(str(A), str(A)),
+                "Question": primary_turn.get("Original_question", ""),
+                "UserResponse": primary_turn.get("User_input", ""),
+                "Classification": primary_turn.get("DLA_result", ""),
+                "Score": primary_turn.get("Score", ""),
+                "Reward": R,
+                "QBefore": q_predict,
+                "QAfter": q_after,
+                "Terminate": DLA_terminate,
+                "AttemptCount": len(action_turn_records),
+            }
+            self.rl_trace_records.append(trace_record)
+            for turn_record in action_turn_records:
+                turn_record["Reward"] = R
+                turn_record["QState"] = S
+                turn_record["QAction"] = A
+                turn_record["QBefore"] = q_predict
+                turn_record["QAfter"] = q_after
+                turn_record["NextState"] = S_
             logger.debug(
-                f"Q update applied at action: Q(S={S},A={A}) {q_predict} -> {new_q_table.loc[S, A]} (target={q_target})"
+                f"Q update applied at action: Q(S={S},A={A}) {q_predict} -> {q_after} (target={q_target})"
             )
             S = S_
             # If the DLA process signals termination, end the loop and save results
@@ -187,7 +233,7 @@ class HandlerRL:
             
             # Save Q tables (in parallel with existing results)
             qdir = os.path.join(DATA_DIR, "q_tables")
-            qfile = os.path.join(qdir, f"item_qtable_{SUBJECT_ID}.csv")
+            qfile = self.q_table_file
             self.item_q_table = new_q_table
             dir_preexisted = os.path.exists(qdir)
             if not dir_preexisted:
@@ -199,9 +245,26 @@ class HandlerRL:
                 logger.info(f"Updated item Q table for subject {SUBJECT_ID} at {qfile}.")
             else:
                 logger.info(f"Created new item Q table for subject {SUBJECT_ID} at {qfile}.")
+            write_rl_trace(self.rl_trace_file, self.rl_trace_records)
+            logger.info(f"Saved RL trace for subject {SUBJECT_ID} at {self.rl_trace_file}.")
+
+            write_session_summary(
+                self.session_summary_file,
+                {
+                    "run_id": self.run_id,
+                    "subject_id": SUBJECT_ID,
+                    "timestamp": now_iso(),
+                    "screening_turn_count": len(self.rl_trace_records),
+                    "rl_trace_file": self.rl_trace_file,
+                    "q_table_file": qfile,
+                    "cbt_candidates": cbt_candidates_from_question_lib(self.question_lib),
+                },
+            )
+            logger.info(f"Saved session summary at {self.session_summary_file}.")
 
         # Run CBT after the screening loop concludes
-        run_cbt(self.question_lib)
+        self.session_control.mark_cbt()
+        run_cbt(self.question_lib, session_control=self.session_control)
         logger.info("Completed CBT flow.")
         # Persist question_lib again to capture CBT notes
         save_filename = QUESTION_LIB_FILENAME.replace(".json", f"_{int(time.time())}.json")
@@ -211,6 +274,28 @@ class HandlerRL:
         # Generate final results for this session
         generate_results(self.question_lib, self.new_response)
         logger.info("Generated final results for this session.")
+
+        try:
+            cbt_used, cbt_summary = self._detect_cbt_summary()
+            write_session_summary(
+                self.session_summary_file,
+                {
+                    "run_id": self.run_id,
+                    "subject_id": SUBJECT_ID,
+                    "timestamp": now_iso(),
+                    "screening_turn_count": len(self.rl_trace_records),
+                    "rl_trace_file": self.rl_trace_file,
+                    "q_table_file": self.q_table_file,
+                    "report_file": REPORT_FILE,
+                    "notes_file": NOTES_FILE,
+                    "cbt_used": cbt_used,
+                    "cbt_summary": cbt_summary,
+                    "cbt_candidates": cbt_candidates_from_question_lib(self.question_lib),
+                },
+            )
+            logger.info(f"Updated session summary after CBT at {self.session_summary_file}.")
+        except Exception as e:
+            logger.warning(f"Failed to update session summary after CBT: {e}")
 
         # Deliver concluding message (LLM-generated) only if CBT was NOT used
         # If CBT ran, its own final message is the user-visible conclusion. Avoid double messages due to lock semantics.
@@ -236,9 +321,7 @@ class HandlerRL:
                 )
                 closing = llm_complete(sys_prompt, user_payload).strip()
                 time.sleep(0.5)
-                log_question(closing)
-                time.sleep(0.5)
-                self._unlock_question_if_stuck()
+                log_system_message(closing)
             else:
                 logger.info("CBT delivered its own closing; skipping RL-level closing to avoid double message.")
         except Exception as e:
@@ -248,9 +331,7 @@ class HandlerRL:
             if not cbt_used:
                 fallback = "Thank you for your time today. Take care, and goodbye."
                 time.sleep(0.5)
-                log_question(fallback)
-                time.sleep(0.5)
-                self._unlock_question_if_stuck()
+                log_system_message(fallback)
 
     def _detect_cbt_summary(self) -> tuple:
         """Return (cbt_used, summary_str) by scanning question_lib notes for CBT markers."""

@@ -91,10 +91,20 @@ class LocalCaiTIRuntime:
         }
         if self.settings.tokenizer_subdir:
             kwargs["subfolder"] = self.settings.tokenizer_subdir
-        tokenizer = self._tokenizer_cls.from_pretrained(
-            tokenizer_ref,
-            **kwargs,
-        )
+        try:
+            tokenizer = self._tokenizer_cls.from_pretrained(
+                tokenizer_ref,
+                **kwargs,
+            )
+        except ValueError as exc:
+            if "TokenizersBackend" not in str(exc):
+                raise
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs["tokenizer_type"] = "llama"
+            tokenizer = self._tokenizer_cls.from_pretrained(
+                tokenizer_ref,
+                **fallback_kwargs,
+            )
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
@@ -106,8 +116,9 @@ class LocalCaiTIRuntime:
         }
         if self.settings.base_subdir:
             kwargs["subfolder"] = self.settings.base_subdir
-        if self.settings.device_map:
-            kwargs["device_map"] = self.settings.device_map
+        device_map = self._resolve_device_map(self.settings.device_map)
+        if device_map is not None:
+            kwargs["device_map"] = device_map
         return self._model_cls.from_pretrained(self.settings.model_id, **kwargs)
 
     def _load_adapters(self):
@@ -150,6 +161,17 @@ class LocalCaiTIRuntime:
         if dtype is None:
             raise ValueError(f"Unsupported torch dtype: {self.settings.torch_dtype}")
         return dtype
+
+    @staticmethod
+    def _resolve_device_map(device_map: str):
+        value = str(device_map or "").strip().lower()
+        if not value:
+            return None
+        if value == "cuda":
+            return {"": 0}
+        if value.startswith("cuda:"):
+            return {"": int(value.split(":", 1)[1])}
+        return device_map
 
     def _generate_text(self, model, prompt: str, config: GenerationConfig) -> str:
         inputs = self.tokenizer(

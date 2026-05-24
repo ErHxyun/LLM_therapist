@@ -30,7 +30,7 @@ local_llm:
   base_subdir: "compressed_model_int4"
   tokenizer_id: "xxue752/caiti_best_model"
   tokenizer_subdir: "compressed_model_int4"
-  device_map: "auto"
+  device_map: "cuda:0"
   torch_dtype: "auto"
   max_input_tokens: 2048
   default_max_new_tokens: 128
@@ -40,10 +40,76 @@ local_llm:
 voice:
   # Paper Section 4 keeps semantic analysis text-only. These commands are I/O only:
   # STT converts microphone audio to text before the LLM pipeline; TTS speaks text after generation.
-  stt_backend: "console" # console | command
-  tts_backend: "console" # console | command
-  stt_command: "" # local command that records/transcribes and writes transcript to stdout
-  tts_command: "" # local command that reads text from stdin and plays speech
+  stt_backend: "faster_whisper" # console | command | faster_whisper
+  tts_backend: "command" # console | command
+  stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 30 --audio-device plughw:0,0 --stt-device cpu --compute-type int8 --beam-size 5 --best-of 5 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --trailing-pad-sec 0.4 --no-speech-timeout-sec 5"
+  stt_whisper_model: "small.en"
+  stt_record_seconds: 30
+  stt_sample_rate: 16000
+  stt_channels: 1
+  stt_audio_device: "plughw:0,0"
+  stt_device: "cpu"
+  stt_compute_type: "int8"
+  stt_beam_size: 5
+  stt_best_of: 5
+  stt_language: "en"
+  stt_initial_prompt: "The speaker is answering CaiTI daily functioning screening questions in English. Common words include doctor, therapist, case manager, medication, mood, sleep, appetite, hygiene, chores, work, school, family, alcohol, drugs, safety, and daily life."
+  stt_vad_filter: true
+  stt_auto_stop: true
+  stt_vad_detector: "auto" # auto | webrtc | energy
+  stt_vad_aggressiveness: 3
+  stt_vad_chunk_ms: 30
+  stt_silence_threshold_dbfs: -45
+  stt_silence_timeout_sec: 1.2
+  stt_trailing_pad_sec: 0.4
+  stt_min_speech_seconds: 0.25
+  stt_min_record_seconds: 1.0
+  stt_no_speech_timeout_sec: 5.0
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.4"
   stt_timeout_sec: 120
   tts_timeout_sec: 60
   empty_transcript_retries: 2
+  # Stage-one waiting music: plays only while CaiTI is thinking between turns.
+  # It is stopped before TTS and STT to avoid audio-device conflicts with aplay.
+  music_backend: "command" # off | command
+  music_path: "assets/audio/music.wav"
+  music_command: "aplay -q {path}"
+
+hardware:
+  # Optional Jetson 40-pin header controls.
+  # LED wiring: BOARD pin -- resistor -- LED -- GND for active-high LEDs.
+  status_leds_enabled: true
+  status_led_white_board_pin: 15
+  status_led_yellow_board_pin: 16
+  status_led_red_board_pin: 18
+  status_led_green_board_pin: 22
+  status_led_active_low: false
+
+  # Button wiring: 3.3V -- 10k resistor -- BOARD pin -- button -- GND.
+  volume_buttons_enabled: true
+  volume_up_board_pin: 32
+  volume_down_board_pin: 33
+  volume_step_percent: 5
+  volume_min_percent: 0
+  volume_max_percent: 100
+  volume_debounce_sec: 0.5
+  volume_release_sec: 0.2
+  volume_poll_interval_sec: 0.01
+  volume_active_low: true
+
+  # Large session button wiring: 3.3V -- 10k resistor -- BOARD pin -- button -- GND.
+  # Short press starts/resumes/pauses at safe workflow boundaries.
+  # Long press skips screening to CBT, then requests close confirmation during CBT.
+  session_button_enabled: true
+  session_button_board_pin: 37
+  session_button_long_press_sec: 3.0
+  session_button_debounce_sec: 0.05
+  session_button_poll_interval_sec: 0.01
+  session_button_active_low: true
+
+monitor:
+  # Local browser monitor for software state:
+  # http://127.0.0.1:8765
+  enabled: true
+  host: "127.0.0.1"
+  port: 8765

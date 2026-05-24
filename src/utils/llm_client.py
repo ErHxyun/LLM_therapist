@@ -45,6 +45,12 @@ def _get_runtime() -> LocalCaiTIRuntime:
     return _RUNTIME
 
 
+def preload_llm_runtime() -> LocalCaiTIRuntime:
+    """Load the local CaiTI runtime before the first user-facing turn."""
+
+    return _get_runtime()
+
+
 def llm_complete(system_content: str, user_content: str) -> str:
     """
     Unified LLM caller used across the app.
@@ -109,6 +115,5 @@ def llm_complete_task(
     return result
 
 
-__all__ = ["llm_complete", "llm_complete_task"]
-
+__all__ = ["llm_complete", "llm_complete_task", "preload_llm_runtime"]
 

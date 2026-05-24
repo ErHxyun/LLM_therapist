@@ -1,12 +1,13 @@
 import re
 
 from src.local_llm.types import LLMTask
+from src.session.control import NullSessionControl
 from src.utils.llm_client import llm_complete, llm_complete_task
 from src.utils.llm_output_contracts import normalize_decision_output, parse_binary_decision
 
 # Set up logger for this module
 from src.utils.log_util import get_logger
-from src.utils.io_record import get_resp_log, log_question, set_question_prefix
+from src.utils.io_record import get_resp_log, log_question, log_system_message, set_question_prefix
 from src.utils.session_event_logger import log_llm_event
 logger = get_logger("CBT")
 
@@ -364,6 +365,60 @@ def parse_cbt_decision(raw_text: str, default: str = "1") -> str:
     return parse_binary_decision(raw_text, default=default)
 
 
+_NUMBER_WORDS = {
+    "one": 1,
+    "first": 1,
+    "two": 2,
+    "second": 2,
+    "three": 3,
+    "third": 3,
+    "four": 4,
+    "fourth": 4,
+    "five": 5,
+    "fifth": 5,
+    "six": 6,
+    "sixth": 6,
+    "seven": 7,
+    "seventh": 7,
+    "eight": 8,
+    "eighth": 8,
+    "nine": 9,
+    "ninth": 9,
+    "ten": 10,
+    "tenth": 10,
+    "eleven": 11,
+    "twelfth": 12,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+}
+_TENS_NUMBER_WORDS = {"twenty": 20, "thirty": 30}
+
+
+def extract_cbt_choice_number(answer: str) -> int | None:
+    answer = str(answer or "").strip().lower()
+    digit_match = re.search(r"\d+", answer)
+    if digit_match:
+        return int(digit_match.group(0))
+
+    words = re.findall(r"[a-z]+", answer.replace("-", " "))
+    for index, word in enumerate(words[:-1]):
+        if word in _TENS_NUMBER_WORDS and words[index + 1] in _NUMBER_WORDS:
+            return _TENS_NUMBER_WORDS[word] + _NUMBER_WORDS[words[index + 1]]
+    for word in words:
+        if word in _NUMBER_WORDS:
+            return _NUMBER_WORDS[word]
+    for word in words:
+        if word in _TENS_NUMBER_WORDS:
+            return _TENS_NUMBER_WORDS[word]
+    return None
+
+
 def _format_stage1_input(statement: str, unhelpful_thoughts: str) -> str:
     return f'"STATEMENT: {statement}; UNHELPFUL_THOUGHTS: {unhelpful_thoughts};"'
 
@@ -610,13 +665,16 @@ __all__ = [
     "stage3_guide",
 ]
 
-def run_cbt(question_lib):
+def run_cbt(question_lib, session_control=None):
     """
     Run CBT stages 0-3 after screening is finished or user said stop.
     Stage 0: ask user to choose a dimension with score=2 to work on.
     Stages 1-3: unhelpful thoughts -> challenge -> reframe, with reasoning and guidance.
     """
     logger.info("Starting CBT flow (stages 0-3).")
+    session_control = session_control or NullSessionControl()
+    session_control.mark_cbt()
+    session_control.checkpoint("cbt")
     # 0) Collect dimensions with score=2
     # candidates: list of (idx_shown, i, j, label_internal, name_human)
     candidates = []
@@ -636,7 +694,7 @@ def run_cbt(question_lib):
 
     if not candidates:
         logger.info("No dimensions with score=2. Skipping CBT.")
-        log_question("We do not have a dimension at score 2 to work on today. We will conclude here.")
+        log_system_message("We do not have a dimension at score 2 to work on today. We will conclude here.")
         return
 
     # Stage 0: directly ask the user to choose a dimension by the shown index
@@ -651,8 +709,10 @@ def run_cbt(question_lib):
         "Tell me the dimension number. For example: 1"
     )
     q0_clean = " \n".join(lines)
+    session_control.checkpoint("cbt")
     log_question(q0_clean)
     resp = get_resp_log()
+    session_control.checkpoint("cbt")
     if isinstance(resp, str) and resp.strip().lower().find("stop") != -1:
         logger.info("User requested stop at CBT stage 0.")
         return
@@ -660,9 +720,8 @@ def run_cbt(question_lib):
     def _pick_candidate(answer: str):
         ans = str(answer).strip().lower()
         # Prefer selecting by the shown index (e.g., "1")
-        m = re.findall(r"\d+", ans)
-        if m:
-            n = int(m[0])
+        n = extract_cbt_choice_number(ans)
+        if n is not None:
             for (k0, i0, j0, lbl0, name0) in candidates:
                 if k0 == n:
                     return (i0, j0, lbl0, name0)
@@ -681,17 +740,19 @@ def run_cbt(question_lib):
             f"Example: 1. Options: {opts}"
         )
         resp = get_resp_log()
+        session_control.checkpoint("cbt")
         if isinstance(resp, str) and resp.strip().lower().find("stop") != -1:
             logger.info("User requested stop at CBT stage 0 retry.")
             return
         chosen = _pick_candidate(resp)
         if chosen is None:
             logger.info("Failed to parse user choice for CBT stage 0. Exit CBT.")
-            log_question("I could not determine your choice. We will stop CBT for now.")
+            log_system_message("I could not determine your choice. We will stop CBT for now.")
             return
 
     i_sel, j_sel, label_sel, name_sel = chosen
     logger.info(f"CBT dimension chosen: [{label_sel}] ({name_sel}) at ({i_sel},{j_sel}).")
+    session_control.checkpoint("cbt")
 
     # Stage 1: derive statement from RV notes of the chosen dimension
     # Prefer the latest RV follow-up response (followup_resp_1),
@@ -736,6 +797,7 @@ def run_cbt(question_lib):
     if isinstance(unhelpful, str) and unhelpful.strip().lower().find("stop") != -1:
         logger.info("User requested stop at CBT stage 1.")
         return
+    session_control.checkpoint("cbt")
 
     # Reason and guide up to two retries
     dec1_raw = stage1_reasoner(statement, unhelpful, dimension=label_sel)
@@ -749,11 +811,12 @@ def run_cbt(question_lib):
         if isinstance(unhelpful, str) and unhelpful.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 1 retry.")
             return
+        session_control.checkpoint("cbt")
         dec1_raw = stage1_reasoner(statement, unhelpful, dimension=label_sel)
         dec1 = parse_cbt_decision(dec1_raw)
         retry += 1
     if dec1 == "1":
-        log_question(CBT_PROFESSIONAL_HELP_MESSAGE)
+        log_system_message(CBT_PROFESSIONAL_HELP_MESSAGE)
         # record brief CBT notes
         question_lib[str(i_sel)][str(j_sel)]["notes"].append([
             f"CBT_dimension: {label_sel}",
@@ -764,11 +827,13 @@ def run_cbt(question_lib):
         return
 
     # Stage 2: challenge the unhelpful thoughts
+    session_control.checkpoint("cbt")
     log_question("Now, how could you challenge those unhelpful thoughts? Please write a brief challenge.")
     challenge = get_resp_log()
     if isinstance(challenge, str) and challenge.strip().lower().find("stop") != -1:
         logger.info("User requested stop at CBT stage 2.")
         return
+    session_control.checkpoint("cbt")
 
     dec2_raw = stage2_reasoner(statement, unhelpful, challenge, dimension=label_sel)
     dec2 = parse_cbt_decision(dec2_raw)
@@ -781,11 +846,12 @@ def run_cbt(question_lib):
         if isinstance(challenge, str) and challenge.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 2 retry.")
             return
+        session_control.checkpoint("cbt")
         dec2_raw = stage2_reasoner(statement, unhelpful, challenge, dimension=label_sel)
         dec2 = parse_cbt_decision(dec2_raw)
         retry += 1
     if dec2 == "1":
-        log_question(CBT_PROFESSIONAL_HELP_MESSAGE)
+        log_system_message(CBT_PROFESSIONAL_HELP_MESSAGE)
         question_lib[str(i_sel)][str(j_sel)]["notes"].append([
             f"CBT_dimension: {label_sel}",
             f"CBT_statement: {statement}",
@@ -796,6 +862,7 @@ def run_cbt(question_lib):
         return
 
     # Stage 3: reframe the thought (prepend an LLM-rephrased recap of user's CHALLENGE)
+    session_control.checkpoint("cbt")
     recap3 = recap_stage3_challenge(statement, unhelpful, challenge)
     set_question_prefix(recap3.strip())
     log_question("Finally, can you reframe the unhelpful thought into a more balanced, constructive one?")
@@ -803,6 +870,7 @@ def run_cbt(question_lib):
     if isinstance(reframe, str) and reframe.strip().lower().find("stop") != -1:
         logger.info("User requested stop at CBT stage 3.")
         return
+    session_control.checkpoint("cbt")
 
     dec3_raw = stage3_reasoner(statement, unhelpful, challenge, reframe, dimension=label_sel)
     dec3 = parse_cbt_decision(dec3_raw)
@@ -815,11 +883,12 @@ def run_cbt(question_lib):
         if isinstance(reframe, str) and reframe.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 3 retry.")
             return
+        session_control.checkpoint("cbt")
         dec3_raw = stage3_reasoner(statement, unhelpful, challenge, reframe, dimension=label_sel)
         dec3 = parse_cbt_decision(dec3_raw)
         retry += 1
     if dec3 == "1":
-        log_question(CBT_PROFESSIONAL_HELP_MESSAGE)
+        log_system_message(CBT_PROFESSIONAL_HELP_MESSAGE)
         question_lib[str(i_sel)][str(j_sel)]["notes"].append([
             f"CBT_dimension: {label_sel}",
             f"CBT_statement: {statement}",
@@ -839,6 +908,4 @@ def run_cbt(question_lib):
         f"CBT_reframe: {reframe}",
         "CBT_stage: success"
     ])
-    log_question("Great work today. We completed the CBT steps for this topic. Thank you for your effort.")
-
-
+    log_system_message("Great work today. We completed the CBT steps for this topic. Thank you for your effort.")

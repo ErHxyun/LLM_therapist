@@ -69,6 +69,32 @@ class StructuredLoggingHooksTest(unittest.TestCase):
         self.assertEqual(rows[0][5], "1_weight, 2")
         self.assertEqual(rows[0][6], "weight, 2")
 
+    def test_response_bridge_logs_guarded_task1_dimension_mismatch(self):
+        original = response_bridge.classify_dimension_and_score_result
+        try:
+            response_bridge.classify_dimension_and_score_result = (
+                lambda _answer, _question: normalize_task1_output("10_sleep, 2")
+            )
+            self.assertEqual(
+                response_bridge.get_openai_resp(
+                    "I am seeing my doctor regularly.",
+                    "Have you been consistently visiting your doctor, therapist, or case manager?",
+                    "care",
+                ),
+                ("NA", 99),
+            )
+        finally:
+            response_bridge.classify_dimension_and_score_result = original
+
+        rows = self._events()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "task1_response_analyzer")
+        self.assertEqual(rows[0][1], "adapters/task1_response_analyzer")
+        self.assertEqual(rows[0][2], "NA")
+        self.assertEqual(rows[0][3], "99")
+        self.assertEqual(rows[0][5], "10_sleep, 2")
+        self.assertEqual(rows[0][6], "NA, 99")
+
     def test_response_bridge_logs_task2_event(self):
         original = response_bridge.classify_general_response_result
         try:

@@ -2,7 +2,7 @@ from typing import List, Tuple, Dict, Any
 
 import numpy as np
 
-from src.utils.response_bridge import get_openai_resp
+from src.utils.response_bridge import get_openai_resp, is_explicit_stop_request
 from src.utils.text_generators import (
     generate_change,
     generate_change_positive,
@@ -12,6 +12,7 @@ from src.utils.text_generators import (
 )
 from src.utils.llm_client import llm_complete
 from src.utils.session_event_logger import log_llm_event
+from src.utils.session_records import build_question_attempt_record
 
 # Set up logger for this module
 from src.utils.log_util import get_logger
@@ -68,7 +69,7 @@ def retry_guide(topic: str, original_question: str, original_answer: str) -> str
     return _chat_complete(RETRY_GUIDE_SYSTEM_PROMPT, payload)
 
 def _is_stop_request(text: str) -> bool:
-    return "stop" in str(text or "").strip().lower()
+    return is_explicit_stop_request(text)
 
 def _build_reflective_followup(original_response: str, original_question: str = "") -> str:
     response = " ".join(str(original_response or "").split())
@@ -148,6 +149,10 @@ def _if_valid_response(
         if str(score_norm) in ["Yes", "No", "Stop"]:
             logger.info(f"Match special token: {score_norm}")
             if str(score_norm) == "Stop":
+                answer_text = user_segments[i] if i < len(user_segments) else ""
+                if not is_explicit_stop_request(answer_text):
+                    logger.info("Ignoring Stop token because user text is not an explicit stop request.")
+                    continue
                 logger.info("Received 'Stop' label. Terminating evaluation.")
                 return 1, 1, followup_to_RV, question_lib
 
@@ -293,7 +298,7 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
         
     return valid, terminate, previous_question, question_lib
 
-def ask_question(question_lib, S: int) -> Tuple[float, int, str]:
+def ask_question(question_lib, S: int, turn_records: List[Dict[str, Any]] = None) -> Tuple[float, int, str]:
         """
         Handles the RL loop for asking questions within a given item (S).
         Returns the total reward, termination flag, and the last question asked.
@@ -315,9 +320,8 @@ def ask_question(question_lib, S: int) -> Tuple[float, int, str]:
             # Randomly select one question variant to ask
             choice_of_question = np.random.randint(number_of_questions)
             question_text = question_lib[str(S)][str(question_A)]["question"][choice_of_question]
-            # With probability, generate a synonymous version of the question
-            if np.random.uniform() < 0.95:
-                question_text = generate_synonymous_sentences(question_text)
+            # Ask the vetted library wording directly. Runtime paraphrases can
+            # drift polarity, which breaks the fixed Yes/No score mapping.
             # Concatenate the last question (context) with the current question
             question_text_ask = question_text
             # Log the question being asked
@@ -328,9 +332,27 @@ def ask_question(question_lib, S: int) -> Tuple[float, int, str]:
             dimension_label = question_lib[str(S)][str(question_A)]["label"]
             DLA_result = [[label, score] for (label, score) in classify_segments(user_input, question_text, dimension_label)]
             # Evaluate the result and update state
+            score_before = list(question_lib[str(S)][str(question_A)]["score"])
             valid, DLA_terminate, previous_question, question_lib = evaluate_result(
                 question_lib, DLA_result, S, question_A, user_input, question_text
             )
+            if turn_records is not None:
+                turn_records.append(
+                    build_question_attempt_record(
+                        item_id=S,
+                        question_index=question_A,
+                        dimension=dimension_label,
+                        question_text=question_text,
+                        user_segments=user_input,
+                        classification=DLA_result,
+                        score_before=score_before,
+                        score_after=question_lib[str(S)][str(question_A)]["score"],
+                        valid=valid,
+                        terminate=DLA_terminate,
+                        attempt="initial",
+                        triggered_reflection=bool(previous_question),
+                    )
+                )
             # If the answer is invalid (valid == 0) and the process has not been terminated (DLA_terminate == 0), 
             # we may want to give the user a chance to clarify their response.
             # Only retry if DLA_result is empty or every (label, score) pair suggests NA or an unclassified response (score==99 or label=="NA").
@@ -346,9 +368,27 @@ def ask_question(question_lib, S: int) -> Tuple[float, int, str]:
                 dimension_label = question_lib[str(S)][str(question_A)]["label"]
                 DLA_result = [[label, score] for (label, score) in classify_segments(user_input, question_text, dimension_label)]
                 # Re-evaluate the new answer and update state accordingly
+                score_before = list(question_lib[str(S)][str(question_A)]["score"])
                 valid, DLA_terminate, previous_question, question_lib = evaluate_result(
                     question_lib, DLA_result, S, question_A, user_input, question_text
                 )
+                if turn_records is not None:
+                    turn_records.append(
+                        build_question_attempt_record(
+                            item_id=S,
+                            question_index=question_A,
+                            dimension=dimension_label,
+                            question_text=question_text,
+                            user_segments=user_input,
+                            classification=DLA_result,
+                            score_before=score_before,
+                            score_after=question_lib[str(S)][str(question_A)]["score"],
+                            valid=valid,
+                            terminate=DLA_terminate,
+                            attempt="retry",
+                            triggered_reflection=bool(previous_question),
+                        )
+                    )
         
         # Retrieve all scores for this question after answering
         all_score = question_lib[str(S)][str(question_A)]["score"]

@@ -10,6 +10,12 @@ class CBTTask4Test(unittest.TestCase):
         self.assertEqual(CBT.parse_cbt_decision("DECISION: 1"), "1")
         self.assertEqual(CBT.parse_cbt_decision("n/a", default="1"), "1")
 
+    def test_extract_cbt_choice_number_accepts_spoken_numbers(self):
+        self.assertEqual(CBT.extract_cbt_choice_number("1"), 1)
+        self.assertEqual(CBT.extract_cbt_choice_number("One."), 1)
+        self.assertEqual(CBT.extract_cbt_choice_number("I choose first"), 1)
+        self.assertEqual(CBT.extract_cbt_choice_number("twenty one"), 21)
+
     def test_stage1_reasoner_uses_task4_stage1_adapter(self):
         calls = []
         original = CBT.llm_complete_task
