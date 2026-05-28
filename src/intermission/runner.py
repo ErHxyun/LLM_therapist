@@ -8,9 +8,7 @@ or adapter prompts.
 
 from __future__ import annotations
 
-import os
 import random
-import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -27,7 +25,8 @@ from src.intermission.tasks import (
 from src.intermission.storage import IntermissionScreeningStore, build_intermission_store
 from src.utils import config_loader
 from src.utils.log_util import get_logger
-from src.voice.backends import CommandTTS, TTSBackend
+from src.voice.backends import TTSBackend
+from src.voice.tts import TTSRouteSettings, build_tts_from_settings
 
 logger = get_logger("IntermissionRunner")
 
@@ -380,7 +379,16 @@ def build_intermission_runner(
     settings = build_intermission_settings()
     if not settings.enabled:
         return NullIntermissionRunner()
-    tts = _build_intermission_tts(settings, primary_tts)
+    tts = build_tts_from_settings(
+        TTSRouteSettings(
+            role="intermission",
+            backend=settings.tts_backend,
+            command=settings.tts_command,
+            timeout_sec=config_loader.VOICE_TTS_TIMEOUT_SEC,
+            fallback_to_primary=settings.fallback_to_primary_tts,
+        ),
+        primary_tts=primary_tts,
+    )
     if tts is None:
         return NullIntermissionRunner()
     store = (
@@ -396,34 +404,3 @@ def build_intermission_runner(
         status_leds=status_leds,
         store=store,
     )
-
-
-def _build_intermission_tts(settings: IntermissionSettings, primary_tts=None):
-    backend = settings.tts_backend.strip().lower()
-    if backend == "primary":
-        return primary_tts
-    if backend != "command":
-        logger.warning("Unsupported intermission TTS backend %r; using primary TTS.", settings.tts_backend)
-        return primary_tts if settings.fallback_to_primary_tts else None
-
-    command = settings.tts_command.strip()
-    if not command:
-        return primary_tts if settings.fallback_to_primary_tts else None
-    model_path = _extract_command_option(command, "--model")
-    if model_path and not os.path.exists(model_path):
-        logger.warning("Intermission TTS model missing: %s", model_path)
-        return primary_tts if settings.fallback_to_primary_tts else None
-    return CommandTTS(command, timeout_sec=config_loader.VOICE_TTS_TIMEOUT_SEC)
-
-
-def _extract_command_option(command: str, option: str) -> str:
-    try:
-        parts = shlex.split(command)
-    except ValueError:
-        return ""
-    for index, part in enumerate(parts):
-        if part == option and index + 1 < len(parts):
-            return parts[index + 1]
-        if part.startswith(option + "="):
-            return part.split("=", 1)[1]
-    return ""

@@ -35,13 +35,10 @@ from src.utils.config_loader import (
     VOICE_STT_VAD_DETECTOR,
     VOICE_STT_VAD_FILTER,
     VOICE_STT_WHISPER_MODEL,
-    VOICE_TTS_BACKEND,
-    VOICE_TTS_COMMAND,
-    VOICE_TTS_TIMEOUT_SEC,
 )
 from src.utils.log_util import get_logger
 from src.voice.exceptions import VoiceInterrupted
-from src.voice.tts import CommandTTS, ConsoleTTS
+from src.voice.tts import CommandTTS, ConsoleTTS, build_primary_tts
 
 logger = get_logger("VoiceBackends")
 
@@ -311,9 +308,4 @@ def build_stt() -> STTBackend:
 
 
 def build_tts() -> TTSBackend:
-    backend = VOICE_TTS_BACKEND.strip().lower()
-    if backend == "console":
-        return ConsoleTTS()
-    if backend == "command":
-        return CommandTTS(VOICE_TTS_COMMAND, VOICE_TTS_TIMEOUT_SEC)
-    raise ValueError(f"Unsupported TTS backend: {VOICE_TTS_BACKEND}")
+    return build_primary_tts()
