@@ -38,6 +38,7 @@ from src.utils.config_loader import (  # noqa: E402
     VOICE_TTS_COMMAND,
     VOICE_TTS_TIMEOUT_SEC,
 )
+from scripts import piper_tts_command as piper_tts  # noqa: E402
 from src.voice.backends import build_stt  # noqa: E402
 from src.voice.music import format_music_command  # noqa: E402
 
@@ -98,9 +99,7 @@ def check_configuration() -> list[str]:
         if script.endswith(".py") and not resolve_repo_path(script).exists():
             failures.append(f"Configured script does not exist: {script}")
 
-    tts_model = command_option(VOICE_TTS_COMMAND, "--model")
-    if tts_model and not resolve_repo_path(tts_model).exists():
-        failures.append(f"Piper model does not exist: {tts_model}")
+    failures.extend(_validate_piper_command(VOICE_TTS_COMMAND, "Piper"))
 
     audio_device = command_option(VOICE_STT_COMMAND, "--audio-device") if stt_backend == "command" else VOICE_STT_AUDIO_DEVICE
     if audio_device and shutil.which("arecord") is None:
@@ -136,15 +135,35 @@ def check_configuration() -> list[str]:
                 f"intermission.tts_backend is {INTERMISSION_TTS_BACKEND!r}; expected 'command' or 'primary'."
             )
         if intermission_backend == "command":
-            model_path = command_option(INTERMISSION_TTS_COMMAND, "--model")
-            if model_path and not resolve_repo_path(model_path).exists() and not INTERMISSION_FALLBACK_TO_PRIMARY_TTS:
-                failures.append(f"Intermission TTS model does not exist: {model_path}")
+            failures.extend(
+                _validate_piper_command(
+                    INTERMISSION_TTS_COMMAND,
+                    "Intermission Piper",
+                    allow_voice_fallback=INTERMISSION_FALLBACK_TO_PRIMARY_TTS,
+                )
+            )
             executable = command_option(INTERMISSION_TTS_COMMAND, "--executable") or "piper"
             if INTERMISSION_TTS_COMMAND and "piper_tts_command.py" in INTERMISSION_TTS_COMMAND:
                 if shutil.which(executable) is None:
                     failures.append(f"Intermission Piper executable is not available: {executable}")
 
     return failures
+
+
+def _validate_piper_command(command: str, label: str, allow_voice_fallback: bool = False) -> list[str]:
+    if "piper_tts_command.py" not in command:
+        return []
+    model_path = command_option(command, "--model")
+    if not model_path:
+        return [f"{label} model path is empty."]
+    resolved = resolve_repo_path(model_path)
+    try:
+        piper_tts.validate_piper_voice(str(resolved))
+    except Exception as exc:
+        if allow_voice_fallback:
+            return []
+        return [f"{label} voice is unavailable: {exc}"]
+    return []
 
 
 def run_command(command: str, timeout_sec: int, stdin_text: str = "") -> subprocess.CompletedProcess[str]:

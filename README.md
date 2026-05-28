@@ -330,7 +330,9 @@ installed and falls back to the older dBFS detector otherwise.
 
 If you switch back to the `command` STT backend, STT commands must write
 transcripts to stdout. TTS commands must read text from stdin and play audio
-locally.
+locally. The bundled Piper command validates both the `.onnx` voice and its
+`.onnx.json` config before playback, then falls back to `espeak-ng` when Piper
+cannot synthesize audio.
 
 Background music is optional. With `music_backend: "mpv"`, music loops through the whole session, lowers during CaiTI TTS and user STT, pauses on the button pause, and resumes from the same playback process when the session continues. Install `mpv` on the Jetson before using this backend:
 

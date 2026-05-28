@@ -85,6 +85,7 @@ class VoiceCommandScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             model = Path(tmpdir) / "voice.onnx"
             model.write_bytes(b"model")
+            Path(f"{model}.json").write_text("{}", encoding="utf-8")
 
             def runner(command, **kwargs):
                 calls.append((command, kwargs))
@@ -109,6 +110,7 @@ class VoiceCommandScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             model = Path(tmpdir) / "voice.onnx"
             model.write_bytes(b"model")
+            Path(f"{model}.json").write_text("{}", encoding="utf-8")
 
             def runner(command, **kwargs):
                 if command[0] == "piper":
@@ -131,6 +133,38 @@ class VoiceCommandScriptTests(unittest.TestCase):
             stderr.getvalue().splitlines(),
             [tts_script.PLAYBACK_START_MARKER, tts_script.PLAYBACK_END_MARKER],
         )
+
+    def test_piper_voice_validation_requires_json_config(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model = Path(tmpdir) / "voice.onnx"
+            model.write_bytes(b"model")
+
+            with self.assertRaises(FileNotFoundError):
+                tts_script.validate_piper_voice(str(model))
+
+    def test_piper_speak_can_use_cached_fallback(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model = Path(tmpdir) / "missing.onnx"
+            fallback = Path(tmpdir) / "fallback.wav"
+            fallback.write_bytes(b"RIFF" + b"0" * 80)
+
+            def runner(command, **kwargs):
+                calls.append((command, kwargs))
+                return _Completed()
+
+            tts_script.speak_text(
+                "Hello.",
+                model_path=str(model),
+                executable="piper",
+                player="aplay",
+                fallback_executable="",
+                cached_fallback_wav=str(fallback),
+                runner=runner,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0], "aplay")
 
     def test_arecord_command_is_mono_16k_wav(self):
         command = stt_script.build_arecord_command(

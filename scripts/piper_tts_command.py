@@ -7,7 +7,9 @@ with a local audio player. Designed for CAITI_TTS_COMMAND.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +18,8 @@ from typing import Callable, Sequence
 
 PLAYBACK_START_MARKER = "__CAITI_TTS_PLAYBACK_START__"
 PLAYBACK_END_MARKER = "__CAITI_TTS_PLAYBACK_END__"
+ESPEAK_FALLBACK = "espeak-ng"
+CACHED_FALLBACK_WAV = Path(__file__).resolve().parents[1] / "assets" / "audio" / "tts_fallback.wav"
 
 
 def build_piper_command(
@@ -46,6 +50,60 @@ def build_player_command(player: str, wav_file: str) -> list[str]:
     return [player, wav_file]
 
 
+def validate_piper_voice(model_path: str) -> None:
+    if not model_path:
+        raise ValueError("Piper model path is required.")
+    model = Path(model_path)
+    if not model.exists():
+        raise FileNotFoundError(f"Piper model not found: {model_path}")
+    if model.stat().st_size == 0:
+        raise RuntimeError(f"Piper model is empty: {model_path}")
+
+    config = Path(f"{model_path}.json")
+    if not config.exists():
+        raise FileNotFoundError(f"Piper model config not found: {config}")
+    if config.stat().st_size == 0:
+        raise RuntimeError(f"Piper model config is empty: {config}")
+    try:
+        json.loads(config.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Piper model config is invalid JSON: {config}") from exc
+
+
+def build_espeak_command(executable: str, text: str, output_file: str) -> list[str]:
+    return [executable, "-v", "en-us", "-s", "140", "-w", output_file, text]
+
+
+def synthesize_espeak_wav(
+    text: str,
+    output_file: str,
+    executable: str = ESPEAK_FALLBACK,
+    timeout_sec: int = 60,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> bool:
+    if not executable or shutil.which(executable) is None:
+        return False
+    completed = runner(
+        build_espeak_command(executable, text, output_file),
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec,
+    )
+    return completed.returncode == 0 and _is_valid_wav(output_file)
+
+
+def copy_cached_fallback_wav(output_file: str, cached_fallback_wav: str | os.PathLike[str] | None = None) -> bool:
+    source = Path(cached_fallback_wav) if cached_fallback_wav else CACHED_FALLBACK_WAV
+    if not source.exists() or source.stat().st_size <= 44:
+        return False
+    shutil.copyfile(source, output_file)
+    return _is_valid_wav(output_file)
+
+
+def _is_valid_wav(wav_file: str) -> bool:
+    return Path(wav_file).exists() and Path(wav_file).stat().st_size > 44
+
+
 def speak_text(
     text: str,
     model_path: str,
@@ -55,38 +113,49 @@ def speak_text(
     sentence_silence: float = 0.4,
     timeout_sec: int = 60,
     emit_playback_markers: bool = False,
+    fallback_executable: str = ESPEAK_FALLBACK,
+    cached_fallback_wav: str | os.PathLike[str] | None = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
     text = str(text or "").strip()
     if not text:
         return
-    if not model_path:
-        raise ValueError("Piper model path is required.")
-    if not Path(model_path).exists():
-        raise FileNotFoundError(f"Piper model not found: {model_path}")
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         wav_file = tmp.name
 
     try:
-        piper_cmd = build_piper_command(
-            executable,
-            model_path,
-            wav_file,
-            length_scale,
-            sentence_silence,
-        )
-        completed = runner(
-            piper_cmd,
-            input=text,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError((completed.stderr or "").strip() or "Piper TTS failed.")
-        if not Path(wav_file).exists() or Path(wav_file).stat().st_size <= 44:
-            raise RuntimeError("Piper produced an empty or invalid WAV file.")
+        piper_error: Exception | None = None
+        try:
+            validate_piper_voice(model_path)
+            piper_cmd = build_piper_command(
+                executable,
+                model_path,
+                wav_file,
+                length_scale,
+                sentence_silence,
+            )
+            completed = runner(
+                piper_cmd,
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError((completed.stderr or "").strip() or "Piper TTS failed.")
+            if not _is_valid_wav(wav_file):
+                raise RuntimeError("Piper produced an empty or invalid WAV file.")
+        except Exception as exc:
+            piper_error = exc
+            if not synthesize_espeak_wav(
+                text,
+                wav_file,
+                executable=fallback_executable,
+                timeout_sec=timeout_sec,
+                runner=runner,
+            ) and not copy_cached_fallback_wav(wav_file, cached_fallback_wav):
+                raise RuntimeError(f"Piper TTS failed and no fallback audio is available: {exc}") from exc
 
         play_cmd = build_player_command(player, wav_file)
         if emit_playback_markers:
@@ -103,6 +172,8 @@ def speak_text(
                 print(PLAYBACK_END_MARKER, file=sys.stderr, flush=True)
         if completed.returncode != 0:
             raise RuntimeError((completed.stderr or "").strip() or "Audio playback failed.")
+        if piper_error is not None:
+            print(f"Piper TTS fallback used: {piper_error}", file=sys.stderr)
     finally:
         try:
             os.remove(wav_file)
@@ -122,6 +193,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=float(os.environ.get("CAITI_PIPER_SENTENCE_SILENCE", "0.4")),
     )
     parser.add_argument("--timeout-sec", type=int, default=int(os.environ.get("CAITI_TTS_TIMEOUT_SEC", "60")))
+    parser.add_argument("--fallback-executable", default=os.environ.get("CAITI_TTS_FALLBACK_EXECUTABLE", ESPEAK_FALLBACK))
     parser.add_argument(
         "--playback-markers",
         action="store_true",
@@ -143,6 +215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sentence_silence=args.sentence_silence,
             timeout_sec=args.timeout_sec,
             emit_playback_markers=args.playback_markers,
+            fallback_executable=args.fallback_executable,
         )
     except Exception as exc:
         print(str(exc), file=sys.stderr)
