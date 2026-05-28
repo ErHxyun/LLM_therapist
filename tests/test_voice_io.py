@@ -109,6 +109,10 @@ class VoiceIOTests(unittest.TestCase):
             stt = FasterWhisperSTT(model="base.en", audio_device="plughw:0,0")
             self.assertEqual(stt.listen(), "I see my doctor.")
             self.assertEqual(stt.listen(), "I see my doctor.")
+            self.assertEqual(stt.last_timing["transcript_length"], 16)
+            self.assertIn("record_duration_sec", stt.last_timing)
+            self.assertIn("transcribe_duration_sec", stt.last_timing)
+            self.assertIn("total_listen_duration_sec", stt.last_timing)
         finally:
             backends.whisper_stt.record_wav_auto_stop = original_record
             backends.whisper_stt.load_whisper_model = original_load
