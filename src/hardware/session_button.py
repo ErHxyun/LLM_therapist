@@ -1,4 +1,4 @@
-"""GPIO controller for the large CaiTI session button."""
+"""GPIO controller for the CaiTI session button."""
 
 from __future__ import annotations
 
@@ -131,7 +131,7 @@ class SessionButtonController:
                 state.press_started_at = now
             if not state.long_press_emitted and now - state.press_started_at >= self.settings.long_press_sec:
                 state.long_press_emitted = True
-                logger.info("Large button long press detected.")
+                logger.info("Button long press detected.")
                 self.on_long_press()
                 return "long"
             return None
@@ -148,7 +148,7 @@ class SessionButtonController:
             if press_started_at is not None and not long_emitted:
                 duration = now - press_started_at
                 if duration >= self.settings.debounce_sec:
-                    logger.info("Large button short press detected.")
+                    logger.info("Button short press detected.")
                     self.on_short_press()
                     return "short"
         return None

@@ -71,6 +71,37 @@ def retry_guide(topic: str, original_question: str, original_answer: str) -> str
 def _is_stop_request(text: str) -> bool:
     return is_explicit_stop_request(text)
 
+
+def _workflow_should_stop_waiting(session_control=None):
+    method = getattr(session_control, "should_interrupt_workflow_wait", None)
+    if not callable(method):
+        return None
+    return method
+
+
+def _get_answer_with_control(session_control=None):
+    should_stop = _workflow_should_stop_waiting(session_control)
+    try:
+        return get_answer(should_stop=should_stop)
+    except TypeError:
+        return get_answer()
+
+
+def _get_resp_log_with_control(session_control=None):
+    should_stop = _workflow_should_stop_waiting(session_control)
+    try:
+        return get_resp_log(should_stop=should_stop)
+    except TypeError:
+        return get_resp_log()
+
+
+def _checkpoint_requested_skip_to_cbt(session_control=None) -> bool:
+    method = getattr(session_control, "checkpoint", None)
+    if not callable(method):
+        return False
+    return method("screening") == "skip_to_cbt"
+
+
 def _build_reflective_followup(original_response: str, original_question: str = "") -> str:
     response = " ".join(str(original_response or "").split())
     question = " ".join(str(original_question or "").split())
@@ -215,7 +246,7 @@ def _if_valid_response(
     logger.info("No valid, yes, no, or stop label found in results. Marking as invalid response.")
     return 0, 0, followup_to_RV, question_lib
 
-def evaluate_result(question_lib, DLA_result, S, question_A, user_input, original_question_asked):
+def evaluate_result(question_lib, DLA_result, S, question_A, user_input, original_question_asked, session_control=None):
     """
     Evaluate the result of a user's response to a question.
     Updates the question library and last question as needed.
@@ -234,7 +265,10 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
         logger.info(f"Logging AI follow-up question and collecting user response for item {S}, question {question_A}.")
         # Log the last AI question and get a user response
         log_question(followup_to_RV)
-        user_response = get_resp_log()
+        user_response = _get_resp_log_with_control(session_control)
+        if _checkpoint_requested_skip_to_cbt(session_control):
+            logger.info("Reflection follow-up interrupted by skip-to-CBT request.")
+            return valid, 1, previous_question, question_lib
 
         # ReflectionValidation three steps（topic = the dimension label of the current question）
         topic = question_lib[str(S)][str(question_A)]["label"]
@@ -261,7 +295,10 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
             rv_guide_text = rv_guide(topic, original_question_asked, original_resp, user_response)
             rv_guide_texts.append(rv_guide_text)
             log_question(rv_guide_text)
-            user_response = get_resp_log()
+            user_response = _get_resp_log_with_control(session_control)
+            if _checkpoint_requested_skip_to_cbt(session_control):
+                logger.info("Reflection retry interrupted by skip-to-CBT request.")
+                return valid, 1, previous_question, question_lib
             followup_responses.append(user_response)
             rv_stopped = _is_stop_request(user_response)
 
@@ -298,7 +335,12 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
         
     return valid, terminate, previous_question, question_lib
 
-def ask_question(question_lib, S: int, turn_records: List[Dict[str, Any]] = None) -> Tuple[float, int, str]:
+def ask_question(
+    question_lib,
+    S: int,
+    turn_records: List[Dict[str, Any]] = None,
+    session_control=None,
+) -> Tuple[float, int, str]:
         """
         Handles the RL loop for asking questions within a given item (S).
         Returns the total reward, termination flag, and the last question asked.
@@ -327,14 +369,17 @@ def ask_question(question_lib, S: int, turn_records: List[Dict[str, Any]] = None
             # Log the question being asked
             log_question(question_text_ask)
             # Get user input for the question
-            _ , user_input = get_answer()
+            _ , user_input = _get_answer_with_control(session_control)
+            if _checkpoint_requested_skip_to_cbt(session_control):
+                logger.info("Screening question interrupted by skip-to-CBT request.")
+                return 0.0, 1, previous_question
             # Classify the user response into DLA result segments
             dimension_label = question_lib[str(S)][str(question_A)]["label"]
             DLA_result = [[label, score] for (label, score) in classify_segments(user_input, question_text, dimension_label)]
             # Evaluate the result and update state
             score_before = list(question_lib[str(S)][str(question_A)]["score"])
             valid, DLA_terminate, previous_question, question_lib = evaluate_result(
-                question_lib, DLA_result, S, question_A, user_input, question_text
+                question_lib, DLA_result, S, question_A, user_input, question_text, session_control=session_control
             )
             if turn_records is not None:
                 turn_records.append(
@@ -363,14 +408,17 @@ def ask_question(question_lib, S: int, turn_records: List[Dict[str, Any]] = None
                 guide_text = retry_guide(topic, question_text, original_answer_text)
                 # Show the guide to the user and collect a new response
                 log_question(guide_text)
-                _ , user_input = get_answer()
+                _ , user_input = _get_answer_with_control(session_control)
+                if _checkpoint_requested_skip_to_cbt(session_control):
+                    logger.info("Screening retry interrupted by skip-to-CBT request.")
+                    return 0.0, 1, previous_question
                 # Classify the new user response
                 dimension_label = question_lib[str(S)][str(question_A)]["label"]
                 DLA_result = [[label, score] for (label, score) in classify_segments(user_input, question_text, dimension_label)]
                 # Re-evaluate the new answer and update state accordingly
                 score_before = list(question_lib[str(S)][str(question_A)]["score"])
                 valid, DLA_terminate, previous_question, question_lib = evaluate_result(
-                    question_lib, DLA_result, S, question_A, user_input, question_text
+                    question_lib, DLA_result, S, question_A, user_input, question_text, session_control=session_control
                 )
                 if turn_records is not None:
                     turn_records.append(

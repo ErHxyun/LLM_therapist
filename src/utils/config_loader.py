@@ -22,6 +22,7 @@ LOCAL_LLM = _CFG.get("local_llm", {})
 VOICE = _CFG.get("voice", {})
 HARDWARE = _CFG.get("hardware", {})
 MONITOR = _CFG.get("monitor", {})
+INTERMISSION = _CFG.get("intermission", {})
 
 SUBJECT_ID = str(APP["subject_id"])
 
@@ -89,6 +90,20 @@ LOCAL_LLM_TEMPERATURE = float(
 )
 LOCAL_LLM_TOP_P = float(
     os.environ.get("CAITI_TOP_P", str(LOCAL_LLM.get("top_p", 0.95)))
+)
+LOCAL_LLM_SERVER_URL = os.environ.get(
+    "CAITI_LLM_SERVER_URL",
+    str(LOCAL_LLM.get("server_url", "")),
+).strip()
+LOCAL_LLM_SERVER_HOST = os.environ.get(
+    "CAITI_LLM_SERVER_HOST",
+    str(LOCAL_LLM.get("server_host", "127.0.0.1")),
+)
+LOCAL_LLM_SERVER_PORT = int(
+    os.environ.get("CAITI_LLM_SERVER_PORT", str(LOCAL_LLM.get("server_port", 8890)))
+)
+LOCAL_LLM_SERVER_TIMEOUT_SEC = float(
+    os.environ.get("CAITI_LLM_SERVER_TIMEOUT_SEC", str(LOCAL_LLM.get("server_timeout_sec", 180)))
 )
 
 VOICE_STT_BACKEND = os.environ.get("CAITI_STT_BACKEND", str(VOICE.get("stt_backend", "console")))
@@ -160,6 +175,113 @@ VOICE_EMPTY_TRANSCRIPT_RETRIES = int(
 VOICE_MUSIC_BACKEND = os.environ.get("CAITI_MUSIC_BACKEND", str(VOICE.get("music_backend", "off")))
 VOICE_MUSIC_PATH = os.environ.get("CAITI_MUSIC_PATH", str(VOICE.get("music_path", "")))
 VOICE_MUSIC_COMMAND = os.environ.get("CAITI_MUSIC_COMMAND", str(VOICE.get("music_command", "aplay -q {path}")))
+VOICE_MUSIC_VOLUME_PERCENT = int(
+    os.environ.get("CAITI_MUSIC_VOLUME_PERCENT", str(VOICE.get("music_volume_percent", 30)))
+)
+VOICE_MUSIC_DUCK_VOLUME_PERCENT = int(
+    os.environ.get("CAITI_MUSIC_DUCK_VOLUME_PERCENT", str(VOICE.get("music_duck_volume_percent", 8)))
+)
+VOICE_MUSIC_IPC_PATH = os.environ.get(
+    "CAITI_MUSIC_IPC_PATH",
+    str(VOICE.get("music_ipc_path", "/tmp/caiti_mpv_music.sock")),
+)
+
+INTERMISSION_ENABLED = _bool_env("CAITI_INTERMISSION_ENABLED", INTERMISSION.get("enabled", False))
+INTERMISSION_TTS_BACKEND = os.environ.get(
+    "CAITI_INTERMISSION_TTS_BACKEND",
+    str(INTERMISSION.get("tts_backend", "command")),
+)
+INTERMISSION_TTS_COMMAND = os.environ.get(
+    "CAITI_INTERMISSION_TTS_COMMAND",
+    str(INTERMISSION.get("tts_command", "")),
+)
+INTERMISSION_FALLBACK_TO_PRIMARY_TTS = _bool_env(
+    "CAITI_INTERMISSION_FALLBACK_TO_PRIMARY_TTS",
+    INTERMISSION.get("fallback_to_primary_tts", True),
+)
+INTERMISSION_SCREENING_ENABLED = _bool_env(
+    "CAITI_INTERMISSION_SCREENING_ENABLED",
+    INTERMISSION.get("screening_enabled", True),
+)
+INTERMISSION_BREATHING_ENABLED = _bool_env(
+    "CAITI_INTERMISSION_BREATHING_ENABLED",
+    INTERMISSION.get("breathing_enabled", True),
+)
+INTERMISSION_MINDFULNESS_ENABLED = _bool_env(
+    "CAITI_INTERMISSION_MINDFULNESS_ENABLED",
+    INTERMISSION.get("mindfulness_enabled", True),
+)
+INTERMISSION_MAX_SECONDS = float(
+    os.environ.get("CAITI_INTERMISSION_MAX_SECONDS", str(INTERMISSION.get("max_seconds", 45.0)))
+)
+INTERMISSION_POLL_INTERVAL_SEC = float(
+    os.environ.get(
+        "CAITI_INTERMISSION_POLL_INTERVAL_SEC",
+        str(INTERMISSION.get("poll_interval_sec", 0.1)),
+    )
+)
+INTERMISSION_MAX_SCREENING_ITEMS_PER_TURN = int(
+    os.environ.get(
+        "CAITI_INTERMISSION_MAX_SCREENING_ITEMS_PER_TURN",
+        str(INTERMISSION.get("max_screening_items_per_turn", 1)),
+    )
+)
+INTERMISSION_TRIGGER_MIN_USER_SPEECH_SEC = float(
+    os.environ.get(
+        "CAITI_INTERMISSION_TRIGGER_MIN_USER_SPEECH_SEC",
+        str(INTERMISSION.get("trigger_min_user_speech_sec", 10.0)),
+    )
+)
+INTERMISSION_TRIGGER_MIN_INTERVAL_TURNS = int(
+    os.environ.get(
+        "CAITI_INTERMISSION_TRIGGER_MIN_INTERVAL_TURNS",
+        str(INTERMISSION.get("trigger_min_interval_turns", 2)),
+    )
+)
+INTERMISSION_TRIGGER_PROBABILITY = float(
+    os.environ.get(
+        "CAITI_INTERMISSION_TRIGGER_PROBABILITY",
+        str(INTERMISSION.get("trigger_probability", 0.5)),
+    )
+)
+INTERMISSION_COOLDOWN_TURNS = int(
+    os.environ.get(
+        "CAITI_INTERMISSION_COOLDOWN_TURNS",
+        str(INTERMISSION.get("cooldown_turns", 1)),
+    )
+)
+INTERMISSION_PERSIST_RESULTS = _bool_env(
+    "CAITI_INTERMISSION_PERSIST_RESULTS",
+    INTERMISSION.get("persist_results", True),
+)
+INTERMISSION_DB_PATH = os.environ.get(
+    "CAITI_INTERMISSION_DB_PATH",
+    str(INTERMISSION.get("db_path", "")),
+).strip()
+INTERMISSION_RESULTS_JSON_PATH = os.environ.get(
+    "CAITI_INTERMISSION_RESULTS_JSON_PATH",
+    str(INTERMISSION.get("results_json_path", "")),
+).strip()
+INTERMISSION_LEAD_IN_TEXT = os.environ.get(
+    "CAITI_INTERMISSION_LEAD_IN_TEXT",
+    str(
+        INTERMISSION.get(
+            "lead_in_text",
+            "Caiti needs a little time to think. While we wait, let's do a private check-in. "
+            "This stays separate from our main conversation.",
+        )
+    ),
+)
+INTERMISSION_BRIDGE_TEXT = os.environ.get(
+    "CAITI_INTERMISSION_BRIDGE_TEXT",
+    str(INTERMISSION.get("bridge_text", "Caiti is ready now. Let's come back to the main questions.")),
+)
+INTERMISSION_TRANSITION_DELAY_SEC = float(
+    os.environ.get(
+        "CAITI_INTERMISSION_TRANSITION_DELAY_SEC",
+        str(INTERMISSION.get("transition_delay_sec", 2.0)),
+    )
+)
 
 HARDWARE_STATUS_LEDS_ENABLED = _bool_env(
     "CAITI_STATUS_LEDS_ENABLED",
@@ -171,9 +293,16 @@ HARDWARE_STATUS_LED_WHITE_BOARD_PIN = int(
 HARDWARE_STATUS_LED_YELLOW_BOARD_PIN = int(
     os.environ.get("CAITI_STATUS_LED_YELLOW_BOARD_PIN", str(HARDWARE.get("status_led_yellow_board_pin", 16)))
 )
-HARDWARE_STATUS_LED_RED_BOARD_PIN = int(
-    os.environ.get("CAITI_STATUS_LED_RED_BOARD_PIN", str(HARDWARE.get("status_led_red_board_pin", 18)))
+_HARDWARE_STATUS_LED_BLUE_DEFAULT = str(
+    HARDWARE.get("status_led_blue_board_pin", HARDWARE.get("status_led_red_board_pin", 18))
 )
+HARDWARE_STATUS_LED_BLUE_BOARD_PIN = int(
+    os.environ.get(
+        "CAITI_STATUS_LED_BLUE_BOARD_PIN",
+        os.environ.get("CAITI_STATUS_LED_RED_BOARD_PIN", _HARDWARE_STATUS_LED_BLUE_DEFAULT),
+    )
+)
+HARDWARE_STATUS_LED_RED_BOARD_PIN = HARDWARE_STATUS_LED_BLUE_BOARD_PIN
 HARDWARE_STATUS_LED_GREEN_BOARD_PIN = int(
     os.environ.get("CAITI_STATUS_LED_GREEN_BOARD_PIN", str(HARDWARE.get("status_led_green_board_pin", 22)))
 )

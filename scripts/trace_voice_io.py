@@ -1,7 +1,7 @@
 """Trace CaiTI voice I/O protocol without real audio hardware.
 
 This script validates the record.csv bridge:
-question text -> TTS chunks -> STT transcript -> record.csv response.
+question text -> TTS block -> STT transcript -> record.csv response.
 It does not call the LLM runtime and does not use microphone or speaker devices.
 """
 
@@ -20,7 +20,6 @@ if str(REPO_ROOT) not in sys.path:
 
 import src.voice.io_loop as voice_io
 from src.utils.io_record import HEADER
-from src.voice.sentence_stream import iter_tts_chunks
 
 
 @dataclass
@@ -33,16 +32,15 @@ class ScriptedSTT:
 
 @dataclass
 class CapturingTTS:
-    chunks: list[str] = field(default_factory=list)
+    blocks: list[str] = field(default_factory=list)
 
     def speak(self, text: str) -> None:
-        chunk = str(text or "").strip()
-        if chunk:
-            self.chunks.append(chunk)
+        block = str(text or "").strip()
+        if block:
+            self.blocks.append(block)
 
     def speak_stream(self, text: str) -> None:
-        for chunk in iter_tts_chunks(text):
-            self.speak(chunk)
+        self.speak(text)
 
 
 def main() -> int:
@@ -63,9 +61,9 @@ def main() -> int:
             voice_io.RECORD_CSV = original_record_csv
 
     print("processed:", processed)
-    print("tts_chunks:")
-    for chunk in tts.chunks:
-        print("-", chunk)
+    print("tts_blocks:")
+    for block in tts.blocks:
+        print("-", block)
     print("record_resp:", result.loc[0, "Resp"])
     print("question_lock:", int(result.loc[0, "Question_Lock"]))
     print("resp_lock:", int(result.loc[0, "Resp_Lock"]))

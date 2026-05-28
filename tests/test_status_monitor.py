@@ -10,12 +10,12 @@ class StatusMonitorTests(unittest.TestCase):
         monitor = StatusMonitor(StatusMonitorSettings(enabled=False))
 
         monitor.set_phase("screening")
-        monitor.set_light("red", True)
+        monitor.set_light("blue", True)
         monitor.set_button_event("skip_to_cbt")
         snapshot = monitor.snapshot()
 
         self.assertEqual(snapshot["phase"], "screening")
-        self.assertTrue(snapshot["lights"]["red"])
+        self.assertTrue(snapshot["lights"]["blue"])
         self.assertEqual(snapshot["button"]["last_event"], "skip_to_cbt")
         self.assertGreater(snapshot["version"], 0)
 

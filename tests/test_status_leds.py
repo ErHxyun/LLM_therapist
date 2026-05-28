@@ -32,7 +32,7 @@ class StatusLEDControllerTests(unittest.TestCase):
     def test_start_sets_white_on_and_others_off(self):
         gpio = FakeGPIO()
         controller = StatusLEDController(
-            StatusLEDSettings(enabled=True, white_pin=15, yellow_pin=16, red_pin=18, green_pin=22),
+            StatusLEDSettings(enabled=True, white_pin=15, yellow_pin=16, blue_pin=18, green_pin=22),
             gpio_module=gpio,
         )
 
@@ -48,7 +48,7 @@ class StatusLEDControllerTests(unittest.TestCase):
     def test_status_methods_drive_expected_colors(self):
         gpio = FakeGPIO()
         controller = StatusLEDController(
-            StatusLEDSettings(enabled=True, white_pin=15, yellow_pin=16, red_pin=18, green_pin=22),
+            StatusLEDSettings(enabled=True, white_pin=15, yellow_pin=16, blue_pin=18, green_pin=22),
             gpio_module=gpio,
         )
         controller.start()
@@ -76,7 +76,7 @@ class StatusLEDControllerTests(unittest.TestCase):
             {"set_light": lambda self, color, active: events.append((color, active))},
         )()
         controller = StatusLEDController(
-            StatusLEDSettings(enabled=True, white_pin=15, yellow_pin=16, red_pin=18, green_pin=22),
+            StatusLEDSettings(enabled=True, white_pin=15, yellow_pin=16, blue_pin=18, green_pin=22),
             gpio_module=gpio,
             status_monitor=monitor,
         )
@@ -87,9 +87,9 @@ class StatusLEDControllerTests(unittest.TestCase):
         controller.stop()
 
         self.assertIn(("white", True), events)
-        self.assertIn(("red", True), events)
-        self.assertIn(("red", False), events)
-        self.assertEqual(events[-4:], [("white", False), ("yellow", False), ("red", False), ("green", False)])
+        self.assertIn(("blue", True), events)
+        self.assertIn(("blue", False), events)
+        self.assertEqual(events[-4:], [("white", False), ("yellow", False), ("blue", False), ("green", False)])
 
 
 if __name__ == "__main__":

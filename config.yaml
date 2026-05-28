@@ -36,6 +36,14 @@ local_llm:
   default_max_new_tokens: 128
   temperature: 0.7
   top_p: 0.95
+  # Optional persistent model server. Leave server_url empty for in-process loading.
+  # Start it with: python scripts/run_llm_server.py
+  # Use it from the voice app with:
+  # CAITI_LLM_SERVER_URL=http://127.0.0.1:8890 ./scripts/run_voice_app.sh
+  server_url: ""
+  server_host: "127.0.0.1"
+  server_port: 8890
+  server_timeout_sec: 180
 
 voice:
   # Paper Section 4 keeps semantic analysis text-only. These commands are I/O only:
@@ -65,15 +73,47 @@ voice:
   stt_min_speech_seconds: 0.25
   stt_min_record_seconds: 1.0
   stt_no_speech_timeout_sec: 5.0
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.4"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.6"
   stt_timeout_sec: 120
   tts_timeout_sec: 60
   empty_transcript_retries: 2
-  # Stage-one waiting music: plays only while CaiTI is thinking between turns.
-  # It is stopped before TTS and STT to avoid audio-device conflicts with aplay.
-  music_backend: "command" # off | command
+  # Background music: mpv keeps music alive and lowers volume during TTS/STT.
+  # Use "command" to fall back to the older aplay waiting-music backend.
+  music_backend: "mpv" # off | command | mpv
   music_path: "assets/audio/music.wav"
   music_command: "aplay -q {path}"
+  music_volume_percent: 80
+  music_duck_volume_percent: 40
+  music_ipc_path: "/tmp/caiti_mpv_music.sock"
+
+intermission:
+  # Parallel mini-task layer while CaiTI is thinking.
+  # This layer is isolated from the paper pipeline: it does not write record.csv,
+  # does not call the LLM, and does not update RL/CBT scores or user reports.
+  enabled: true
+  tts_backend: "command" # command | primary
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6"
+  fallback_to_primary_tts: true
+  screening_enabled: true
+  breathing_enabled: true
+  mindfulness_enabled: true
+  max_seconds: 45
+  poll_interval_sec: 0.1
+  # PHQ-2 + GAD-4 items are spread across thinking gaps by default.
+  max_screening_items_per_turn: 1
+  # Only start a mini-task after a longer main-session user answer.
+  # Eligible long-answer turns must pass the interval counter and probability gate.
+  trigger_min_user_speech_sec: 10.0
+  trigger_min_interval_turns: 2
+  trigger_probability: 0.5
+  cooldown_turns: 1
+  # Stores private PHQ/GAD item statuses outside record.csv.
+  persist_results: true
+  db_path: "" # empty = data/logs/session_events.sqlite3
+  results_json_path: "data/phq_gad_results.json"
+  lead_in_text: "Caiti needs a little time to think. While we wait, let's do a brief check-in."
+  bridge_text: "Caiti is ready now. Let's come back to the main questions."
+  transition_delay_sec: 2.0
 
 hardware:
   # Optional Jetson 40-pin header controls.
@@ -81,7 +121,7 @@ hardware:
   status_leds_enabled: true
   status_led_white_board_pin: 15
   status_led_yellow_board_pin: 16
-  status_led_red_board_pin: 18
+  status_led_blue_board_pin: 18
   status_led_green_board_pin: 22
   status_led_active_low: false
 
@@ -97,7 +137,7 @@ hardware:
   volume_poll_interval_sec: 0.01
   volume_active_low: true
 
-  # Large session button wiring: 3.3V -- 10k resistor -- BOARD pin -- button -- GND.
+  # Button wiring: 3.3V -- 10k resistor -- BOARD pin -- button -- GND.
   # Short press starts/resumes/pauses at safe workflow boundaries.
   # Long press skips screening to CBT, then requests close confirmation during CBT.
   session_button_enabled: true

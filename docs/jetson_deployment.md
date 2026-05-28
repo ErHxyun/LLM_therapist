@@ -131,15 +131,15 @@ models/piper/en_US-amy-medium.onnx.json
 
 The validated file size for the `.onnx` model is about 61 MB.
 
-Optional waiting music lives under `assets/audio/`:
+Optional background music lives under `assets/audio/`:
 
 ```text
 assets/audio/music.wav
 ```
 
 Audio files in this directory are ignored by git because they are local runtime
-assets. The stage-one music backend uses `aplay` by default and requires no
-extra Python package.
+assets. The default background backend uses `mpv` IPC so the music can stay
+alive, lower volume during voice activity, and recover after pause/resume.
 
 ## Audio Devices
 
@@ -213,9 +213,30 @@ voice:
   stt_timeout_sec: 120
   tts_timeout_sec: 60
   empty_transcript_retries: 2
-  music_backend: "command"
+  music_backend: "mpv"
   music_path: "assets/audio/music.wav"
   music_command: "aplay -q {path}"
+  music_volume_percent: 80
+  music_duck_volume_percent: 40
+  music_ipc_path: "/tmp/caiti_mpv_music.sock"
+
+intermission:
+  enabled: true
+  tts_backend: "command"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.4"
+  fallback_to_primary_tts: true
+  screening_enabled: true
+  breathing_enabled: true
+  mindfulness_enabled: true
+  max_seconds: 45
+  max_screening_items_per_turn: 1
+  trigger_min_user_speech_sec: 10.0
+  trigger_min_interval_turns: 2
+  trigger_probability: 0.5
+  cooldown_turns: 1
+  persist_results: true
+  db_path: ""
+  results_json_path: "data/phq_gad_results.json"
 ```
 
 The `faster_whisper` backend is persistent: the Whisper model is loaded once
@@ -229,14 +250,34 @@ STT auto-stop behavior:
 - Recording stops early after speech starts and then stays below
   `stt_silence_threshold_dbfs` for `stt_silence_timeout_sec` seconds.
 - `stt_no_speech_timeout_sec` is the time CaiTI waits for the user to begin
-  speaking after TTS finishes, currently 10 seconds.
+  speaking after TTS finishes, currently 5 seconds.
 - This keeps short answers fast while allowing longer answers without the old
   fixed 8-second cutoff.
 
-Waiting music starts during model loading and also plays after STT writes the
-user's transcript while CaiTI produces the next question or response. It is
-stopped before every TTS playback and before every STT recording, so it does
-not enter the transcript or LLM prompts.
+With `music_backend: "mpv"`, background music starts during model loading,
+keeps looping through the session, lowers volume during CaiTI TTS and user STT,
+and resumes after the button pause. Install `mpv` first:
+
+```bash
+sudo apt install mpv
+```
+
+Set `music_backend: "command"` to use the older `aplay` waiting-music behavior
+that stops music before TTS/STT and restarts it while CaiTI is thinking.
+
+The intermission layer runs only while CaiTI is thinking after a user answer.
+It is deliberately separate from the paper pipeline: it does not write to
+`record.csv`, does not call the LLM, and does not update RL/CBT scores or
+reports. PHQ-2/GAD-4 check-ins are framed as private, optional mini-tasks and
+are stored in the structured SQLite intermission tables plus
+`data/phq_gad_results.json`, separate from the main CaiTI question/response
+record. By default, mini-tasks only start after a
+main-session user answer with at least 10 seconds of captured speech. Eligible
+long-answer turns increment a counter; the counter must be greater than 2, then
+the final trigger uses `trigger_probability` randomness. If an activity runs,
+it cools down for one turn. The configured intermission voice comes from
+`intermission.tts_command`; if that model is not installed and
+`fallback_to_primary_tts` is true, the app falls back to the primary CaiTI voice.
 
 Final/system TTS messages use a no-response record marker internally. The voice
 loop speaks those messages without collecting another STT turn, and the voice
@@ -300,6 +341,34 @@ Voice session:
 ```bash
 ./scripts/run_voice_app.sh
 ```
+
+Persistent local LLM server mode:
+
+```bash
+# Terminal 1: keep the model loaded
+python scripts/run_llm_server.py
+
+# Terminal 2: run the voice app against the warm model process
+CAITI_LLM_SERVER_URL=http://127.0.0.1:8890 ./scripts/run_voice_app.sh
+```
+
+Check server readiness:
+
+```bash
+curl http://127.0.0.1:8890/health
+```
+
+This avoids reloading the base model and adapters every time the voice app is
+restarted. It is still local-only; the server does not alter the paper logic.
+
+Node.js hardware/status dashboard:
+
+```bash
+npm run monitor
+```
+
+Open `http://127.0.0.1:8787`. This reads the Python monitor at
+`http://127.0.0.1:8765` and does not write GPIO state.
 
 Console fallback for debugging:
 

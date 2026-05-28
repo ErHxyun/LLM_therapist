@@ -28,6 +28,7 @@ class GenerationConfig:
     do_sample: bool = False
     use_chat_template: bool = True
     max_input_tokens: int = 2048
+    stop_regex: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,4 +39,3 @@ class GenerationResult:
     task: LLMTask
     adapter: str | None
     raw_text: str
-

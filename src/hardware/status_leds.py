@@ -16,7 +16,7 @@ class StatusLEDSettings:
     enabled: bool = False
     white_pin: int = 15
     yellow_pin: int = 16
-    red_pin: int = 18
+    blue_pin: int = 18
     green_pin: int = 22
     active_low: bool = False
 
@@ -39,6 +39,7 @@ class NullStatusLEDController:
 
     def set_stt_active(self, active: bool) -> None:
         return
+
 
 
 @dataclass
@@ -65,13 +66,13 @@ class StatusLEDController:
                 self._started = True
                 self._write_color("white", True)
                 self._write_color("yellow", False)
-                self._write_color("red", False)
+                self._write_color("blue", False)
                 self._write_color("green", False)
                 logger.info(
-                    "Status LEDs started: white=BOARD %s yellow=BOARD %s red=BOARD %s green=BOARD %s",
+                    "Status LEDs started: white=BOARD %s yellow=BOARD %s blue=BOARD %s green=BOARD %s",
                     self.settings.white_pin,
                     self.settings.yellow_pin,
-                    self.settings.red_pin,
+                    self.settings.blue_pin,
                     self.settings.green_pin,
                 )
             except Exception as exc:
@@ -83,7 +84,7 @@ class StatusLEDController:
             if not self._started:
                 return
             try:
-                for color in ("white", "yellow", "red", "green"):
+                for color in ("white", "yellow", "blue", "green"):
                     self._write_color(color, False)
                 self.gpio_module.cleanup(self._pins)
             except Exception as exc:
@@ -100,12 +101,12 @@ class StatusLEDController:
         with self._lock:
             if active:
                 self._write_color("green", False)
-            self._write_color("red", active)
+            self._write_color("blue", active)
 
     def set_stt_active(self, active: bool) -> None:
         with self._lock:
             if active:
-                self._write_color("red", False)
+                self._write_color("blue", False)
             self._write_color("green", active)
 
     @staticmethod
@@ -121,7 +122,7 @@ class StatusLEDController:
         return [
             self.settings.white_pin,
             self.settings.yellow_pin,
-            self.settings.red_pin,
+            self.settings.blue_pin,
             self.settings.green_pin,
         ]
 
@@ -130,7 +131,7 @@ class StatusLEDController:
         return {
             "white": self.settings.white_pin,
             "yellow": self.settings.yellow_pin,
-            "red": self.settings.red_pin,
+            "blue": self.settings.blue_pin,
             "green": self.settings.green_pin,
         }
 
@@ -172,7 +173,7 @@ def build_status_led_settings() -> StatusLEDSettings:
         enabled=config_loader.HARDWARE_STATUS_LEDS_ENABLED,
         white_pin=config_loader.HARDWARE_STATUS_LED_WHITE_BOARD_PIN,
         yellow_pin=config_loader.HARDWARE_STATUS_LED_YELLOW_BOARD_PIN,
-        red_pin=config_loader.HARDWARE_STATUS_LED_RED_BOARD_PIN,
+        blue_pin=config_loader.HARDWARE_STATUS_LED_BLUE_BOARD_PIN,
         green_pin=config_loader.HARDWARE_STATUS_LED_GREEN_BOARD_PIN,
         active_low=config_loader.HARDWARE_STATUS_LED_ACTIVE_LOW,
     )

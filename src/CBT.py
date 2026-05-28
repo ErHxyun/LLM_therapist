@@ -665,6 +665,22 @@ __all__ = [
     "stage3_guide",
 ]
 
+
+def _workflow_should_stop_waiting(session_control):
+    method = getattr(session_control, "should_interrupt_workflow_wait", None)
+    if not callable(method):
+        return None
+    return method
+
+
+def _get_resp_log_with_control(session_control):
+    should_stop = _workflow_should_stop_waiting(session_control)
+    try:
+        return get_resp_log(should_stop=should_stop)
+    except TypeError:
+        return get_resp_log()
+
+
 def run_cbt(question_lib, session_control=None):
     """
     Run CBT stages 0-3 after screening is finished or user said stop.
@@ -711,7 +727,7 @@ def run_cbt(question_lib, session_control=None):
     q0_clean = " \n".join(lines)
     session_control.checkpoint("cbt")
     log_question(q0_clean)
-    resp = get_resp_log()
+    resp = _get_resp_log_with_control(session_control)
     session_control.checkpoint("cbt")
     if isinstance(resp, str) and resp.strip().lower().find("stop") != -1:
         logger.info("User requested stop at CBT stage 0.")
@@ -739,7 +755,7 @@ def run_cbt(question_lib, session_control=None):
             f"Please reply with a single number between 1 and {len(candidates)}. "
             f"Example: 1. Options: {opts}"
         )
-        resp = get_resp_log()
+        resp = _get_resp_log_with_control(session_control)
         session_control.checkpoint("cbt")
         if isinstance(resp, str) and resp.strip().lower().find("stop") != -1:
             logger.info("User requested stop at CBT stage 0 retry.")
@@ -793,7 +809,7 @@ def run_cbt(question_lib, session_control=None):
     )
     set_question_prefix(recap)
     log_question("Can you try to identify any unhelpful thoughts you have that contribute to this situation?")
-    unhelpful = get_resp_log()
+    unhelpful = _get_resp_log_with_control(session_control)
     if isinstance(unhelpful, str) and unhelpful.strip().lower().find("stop") != -1:
         logger.info("User requested stop at CBT stage 1.")
         return
@@ -807,7 +823,7 @@ def run_cbt(question_lib, session_control=None):
         guide1 = stage1_guide(statement)
         log_question(guide1)
         log_question("Please provide your UNHELPFUL_THOUGHTS again, in one sentence.")
-        unhelpful = get_resp_log()
+        unhelpful = _get_resp_log_with_control(session_control)
         if isinstance(unhelpful, str) and unhelpful.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 1 retry.")
             return
@@ -829,7 +845,7 @@ def run_cbt(question_lib, session_control=None):
     # Stage 2: challenge the unhelpful thoughts
     session_control.checkpoint("cbt")
     log_question("Now, how could you challenge those unhelpful thoughts? Please write a brief challenge.")
-    challenge = get_resp_log()
+    challenge = _get_resp_log_with_control(session_control)
     if isinstance(challenge, str) and challenge.strip().lower().find("stop") != -1:
         logger.info("User requested stop at CBT stage 2.")
         return
@@ -842,7 +858,7 @@ def run_cbt(question_lib, session_control=None):
         guide2 = stage2_guide(statement, unhelpful)
         log_question(guide2)
         log_question("Please try to CHALLENGE the unhelpful thoughts again, in one sentence.")
-        challenge = get_resp_log()
+        challenge = _get_resp_log_with_control(session_control)
         if isinstance(challenge, str) and challenge.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 2 retry.")
             return
@@ -866,7 +882,7 @@ def run_cbt(question_lib, session_control=None):
     recap3 = recap_stage3_challenge(statement, unhelpful, challenge)
     set_question_prefix(recap3.strip())
     log_question("Finally, can you reframe the unhelpful thought into a more balanced, constructive one?")
-    reframe = get_resp_log()
+    reframe = _get_resp_log_with_control(session_control)
     if isinstance(reframe, str) and reframe.strip().lower().find("stop") != -1:
         logger.info("User requested stop at CBT stage 3.")
         return
@@ -879,7 +895,7 @@ def run_cbt(question_lib, session_control=None):
         guide3 = stage3_guide(statement, unhelpful, challenge)
         log_question(guide3)
         log_question("Please REFRAME again in one or two sentences.")
-        reframe = get_resp_log()
+        reframe = _get_resp_log_with_control(session_control)
         if isinstance(reframe, str) and reframe.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 3 retry.")
             return

@@ -130,6 +130,7 @@ def record_wav_auto_stop(
     no_speech_timeout_sec: float = 5.0,
     chunk_ms: int = 30,
     popen_factory: Callable[..., subprocess.Popen] = subprocess.Popen,
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """
     Record from arecord until speech is followed by enough silence.
@@ -168,6 +169,8 @@ def record_wav_auto_stop(
 
     try:
         while recorded_sec < max_seconds:
+            if should_stop is not None and should_stop():
+                break
             chunk = process.stdout.read(chunk_size)
             if not chunk:
                 break

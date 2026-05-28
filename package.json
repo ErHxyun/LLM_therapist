@@ -1,0 +1,13 @@
+{
+  "name": "caiti-jetson-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node.js dashboard for the CaiTI Jetson runtime monitor.",
+  "scripts": {
+    "monitor": "node scripts/status_dashboard.js",
+    "monitor:dev": "CAITI_NODE_MONITOR_PORT=8787 node scripts/status_dashboard.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

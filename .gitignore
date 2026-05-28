@@ -6,6 +6,11 @@ LLM_therapist_paper.pdf
 .env
 data/results
 data/logs
+data/record.csv
+data/phq_gad_results.json
+data/q_tables/item_qtable_*.csv
+data/libs/question_lib_v4_[0-9]*.json
+data/libs/question_lib_v4_*_[0-9]*.json
 # data/libs
 # 忽略所有位置的 __pycache__ 文件夹
 __pycache__/
@@ -18,6 +23,11 @@ src/tools/
 
 _archive/
 # data/
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Local speech/model assets can be large. Keep them on-device, not in git.
 models/piper/*.onnx

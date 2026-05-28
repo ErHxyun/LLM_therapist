@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -71,7 +72,7 @@ class LocalCaiTIRuntime:
             import torch
             from huggingface_hub import snapshot_download
             from peft import PeftModel
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, StoppingCriteriaList
         except ImportError as exc:
             raise RuntimeError(
                 "Local CaiTI runtime requires torch, transformers, peft, "
@@ -83,6 +84,8 @@ class LocalCaiTIRuntime:
         self._peft_model_cls = PeftModel
         self._model_cls = AutoModelForCausalLM
         self._tokenizer_cls = AutoTokenizer
+        self._stopping_criteria_cls = StoppingCriteria
+        self._stopping_criteria_list_cls = StoppingCriteriaList
 
     def _load_tokenizer(self):
         tokenizer_ref = self.settings.tokenizer_id or self.settings.model_id
@@ -188,15 +191,37 @@ class LocalCaiTIRuntime:
             "do_sample": config.do_sample,
             "pad_token_id": self.tokenizer.pad_token_id,
             "eos_token_id": self.tokenizer.eos_token_id,
+            "use_cache": True,
         }
         if config.do_sample:
             kwargs["temperature"] = config.temperature
             kwargs["top_p"] = config.top_p
+        if config.stop_regex:
+            kwargs["stopping_criteria"] = self._build_stopping_criteria(
+                config.stop_regex,
+                prompt_length=inputs["input_ids"].shape[1],
+            )
 
         with self._torch.inference_mode():
             output = model.generate(**inputs, **kwargs)
         new_tokens = output[0, inputs["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    def _build_stopping_criteria(self, stop_regex: str, prompt_length: int):
+        pattern = re.compile(stop_regex, flags=re.IGNORECASE)
+        tokenizer = self.tokenizer
+        stopping_criteria_cls = self._stopping_criteria_cls
+        stopping_criteria_list_cls = self._stopping_criteria_list_cls
+
+        class RegexStoppingCriteria(stopping_criteria_cls):
+            def __call__(self, input_ids, scores, **kwargs) -> bool:
+                generated = input_ids[0, prompt_length:]
+                if generated.numel() == 0:
+                    return False
+                text = tokenizer.decode(generated, skip_special_tokens=True)
+                return bool(pattern.search(text))
+
+        return stopping_criteria_list_cls([RegexStoppingCriteria()])
 
     @staticmethod
     def _input_device(model):

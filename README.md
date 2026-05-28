@@ -54,6 +54,7 @@ See [docs/jetson_deployment.md](docs/jetson_deployment.md) for the Jetson deploy
 |   |-- faster_whisper_stt_command.py     # Local microphone recording + Faster-Whisper STT command
 |   |-- long_session_reliability.py       # Mocked full 37-dimension + CBT reliability run
 |   |-- piper_tts_command.py              # Local Piper TTS command
+|   |-- run_llm_server.py                 # Persistent local LLM server
 |   |-- run_voice_app.sh                  # One-command voice app launcher
 |   |-- smoke_test_voice.py               # Local voice hardware/config smoke test
 |   |-- trace_mock_e2e.py                 # Mock end-to-end control-flow trace
@@ -161,13 +162,13 @@ models/piper/en_US-amy-medium.onnx.json
 
 The `models/piper/*.onnx` files are intentionally ignored by git because they are local device assets.
 
-Optional waiting music can be stored at:
+Optional background music can be stored at:
 
 ```text
 assets/audio/music.wav
 ```
 
-Audio files under `assets/audio/` are ignored by git, except `.gitkeep`, because they are local runtime assets. The stage-one music backend uses the system player command in `config.yaml` and does not add a new Python audio dependency.
+Audio files under `assets/audio/` are ignored by git, except `.gitkeep`, because they are local runtime assets. The background music backend uses `mpv` IPC so music can keep playing while CaiTI lowers it during TTS and STT.
 
 ## Validation Order
 
@@ -237,6 +238,32 @@ Voice shell with persistent local Faster-Whisper STT and Piper TTS:
 ./scripts/run_voice_app.sh
 ```
 
+### Persistent LLM Server
+
+By default, each Python process loads the CaiTI model into memory. To keep the
+model warm across voice-app restarts, run the local LLM in one terminal:
+
+```bash
+python scripts/run_llm_server.py
+```
+
+Wait until it logs that the server is ready, then start the voice app from a
+second terminal:
+
+```bash
+CAITI_LLM_SERVER_URL=http://127.0.0.1:8890 ./scripts/run_voice_app.sh
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8890/health
+```
+
+The server is only an inference cache/process boundary. It does not change the
+RL, response-analysis, R-V, CBT, STT, TTS, button, or LED logic. Stop the server
+with `Ctrl+C` when you want to free GPU memory.
+
 The launcher uses `config.yaml` voice defaults:
 
 ```yaml
@@ -259,9 +286,30 @@ voice:
   stt_trailing_pad_sec: 0.4
   stt_no_speech_timeout_sec: 5.0
   tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.4"
-  music_backend: "command"
+  music_backend: "mpv"
   music_path: "assets/audio/music.wav"
   music_command: "aplay -q {path}"
+  music_volume_percent: 80
+  music_duck_volume_percent: 40
+  music_ipc_path: "/tmp/caiti_mpv_music.sock"
+
+intermission:
+  enabled: true
+  tts_backend: "command"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.4"
+  fallback_to_primary_tts: true
+  screening_enabled: true
+  breathing_enabled: true
+  mindfulness_enabled: true
+  max_seconds: 45
+  max_screening_items_per_turn: 1
+  trigger_min_user_speech_sec: 10.0
+  trigger_min_interval_turns: 2
+  trigger_probability: 0.5
+  cooldown_turns: 1
+  persist_results: true
+  db_path: ""
+  results_json_path: "data/phq_gad_results.json"
 ```
 
 The `faster_whisper` backend loads Whisper once and reuses it across turns. It
@@ -274,11 +322,32 @@ If you switch back to the `command` STT backend, STT commands must write
 transcripts to stdout. TTS commands must read text from stdin and play audio
 locally.
 
-Waiting music is optional and plays while the model is loading and while CaiTI is thinking after a user response. It stops before TTS speaks and before STT listens, so music never enters the transcript or LLM prompts. Disable it with:
+Background music is optional. With `music_backend: "mpv"`, music loops through the whole session, lowers during CaiTI TTS and user STT, pauses on the button pause, and resumes from the same playback process when the session continues. Install `mpv` on the Jetson before using this backend:
+
+```bash
+sudo apt install mpv
+```
+
+Disable it with:
 
 ```bash
 CAITI_MUSIC_BACKEND=off ./scripts/run_voice_app.sh
 ```
+
+The intermission layer runs only while CaiTI is thinking after a user answer.
+It is isolated from the paper pipeline: it does not write to `record.csv`, does
+not call the LLM, and does not update RL/CBT scores or reports. PHQ-2/GAD-4
+check-ins are framed as private, optional mini-tasks and are stored in the
+structured SQLite intermission tables plus `data/phq_gad_results.json`,
+separate from the main CaiTI question/response record. By default, mini-tasks
+only start after a main-session user answer with at least 10 seconds of
+captured speech. The eligible
+long-answer counter must then be greater than 2, and the final trigger uses
+`trigger_probability` randomness. If an activity runs, it cools down for one
+turn. The
+intermission voice is configured separately;
+until the male Piper model is present, `fallback_to_primary_tts: true` keeps
+the app audible with CaiTI's primary voice.
 
 To temporarily fall back to console input/output:
 
@@ -290,6 +359,40 @@ To override the tested Jetson USB microphone device:
 
 ```bash
 CAITI_STT_AUDIO_DEVICE=plughw:1,0 ./scripts/run_voice_app.sh
+```
+
+### Node.js Status Dashboard
+
+The Python voice app exposes the source runtime state at:
+
+```text
+http://127.0.0.1:8765/status
+```
+
+For a separate Node.js dashboard/proxy, start the voice app first, then run:
+
+```bash
+npm run monitor
+```
+
+Open:
+
+```text
+http://127.0.0.1:8787
+```
+
+The Node process only reads the Python monitor. It does not control GPIO or
+change the therapy workflow. Useful endpoints:
+
+```bash
+curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/api/status
+```
+
+To change ports:
+
+```bash
+CAITI_NODE_MONITOR_PORT=8790 CAITI_MONITOR_URL=http://127.0.0.1:8765 npm run monitor
 ```
 
 To debug STT quality without running the full CaiTI session:
@@ -312,7 +415,8 @@ python scripts/faster_whisper_stt_command.py \
 ## Runtime Outputs
 
 - `data/record.csv`: local question/response exchange file used by console, server, and voice shells.
-- `data/logs/session_events.sqlite3`: structured event log for LLM calls and key flow events.
+- `data/logs/session_events.sqlite3`: structured event log for LLM calls, key flow events, and isolated intermission PHQ/GAD item records.
+- `data/phq_gad_results.json`: JSON mirror of private intermission PHQ-2/GAD-4 item records and per-scale totals.
 - `data/results/Report_${subject_id}.csv`: final report with `Score`, `Responses`, `Analysis`.
 - `data/results/Notes_${subject_id}.csv`: auxiliary notes output.
 - `data/q_tables/item_qtable_${subject_id}.csv`: learned item Q-table.

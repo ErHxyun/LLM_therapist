@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -69,7 +70,7 @@ class StatusMonitor:
             "lights": {
                 "white": False,
                 "yellow": False,
-                "red": False,
+                "blue": False,
                 "green": False,
             },
             "button": {
@@ -96,7 +97,7 @@ class StatusMonitor:
             if self._started:
                 return True
             try:
-                server = ThreadingHTTPServer((self.settings.host, self.settings.port), _StatusRequestHandler)
+                server = _StatusThreadingHTTPServer((self.settings.host, self.settings.port), _StatusRequestHandler)
                 server.status_monitor = self
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
@@ -150,7 +151,9 @@ class StatusMonitor:
 
     def set_light(self, color: str, active: bool) -> None:
         color = str(color or "").strip().lower()
-        if color not in {"white", "yellow", "red", "green"}:
+        if color == "red":
+            color = "blue"
+        if color not in {"white", "yellow", "blue", "green"}:
             return
 
         def mutate(state: dict[str, Any]) -> None:
@@ -206,7 +209,7 @@ class _StatusRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write_body(body)
 
     def _send_html(self) -> None:
         body = _HTML.encode("utf-8")
@@ -215,7 +218,13 @@ class _StatusRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write_body(body)
+
+    def _write_body(self, body: bytes) -> None:
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            return
 
     def _send_events(self) -> None:
         self.send_response(200)
@@ -234,6 +243,21 @@ class _StatusRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(f"event: status\ndata: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            return
+
+
+class _StatusThreadingHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address) -> None:
+        _, exc, _ = sys.exc_info()
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError, OSError)):
+            logger.debug("Status monitor client disconnected: %s", exc)
+            return
+        super().handle_error(request, client_address)
+
+    def shutdown_request(self, request) -> None:
+        try:
+            super().shutdown_request(request)
+        except OSError:
             return
 
 
@@ -318,8 +342,8 @@ _HTML = """<!doctype html>
     .white.on .dot { background: #f9fafb; }
     .yellow { color: #ca8a04; }
     .yellow.on .dot { background: #facc15; }
-    .red { color: #dc2626; }
-    .red.on .dot { background: #ef4444; }
+    .blue { color: #2563eb; }
+    .blue.on .dot { background: #3b82f6; }
     .green { color: #16a34a; }
     .green.on .dot { background: #22c55e; }
     .label {
@@ -372,11 +396,11 @@ _HTML = """<!doctype html>
     const meanings = {
       white: "Project process is running",
       yellow: "Session has begun",
-      red: "CaiTI is speaking",
-      green: "CaiTI is listening"
+      blue: "Therapist is speaking",
+      green: "Client is speaking"
     };
     const lights = document.getElementById("lights");
-    for (const color of ["white", "yellow", "red", "green"]) {
+    for (const color of ["white", "yellow", "blue", "green"]) {
       const card = document.createElement("article");
       card.className = `light ${color}`;
       card.id = `light-${color}`;

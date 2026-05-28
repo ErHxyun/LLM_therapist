@@ -23,6 +23,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.utils.config_loader import (  # noqa: E402
+    INTERMISSION_ENABLED,
+    INTERMISSION_FALLBACK_TO_PRIMARY_TTS,
+    INTERMISSION_TTS_BACKEND,
+    INTERMISSION_TTS_COMMAND,
     VOICE_MUSIC_BACKEND,
     VOICE_MUSIC_COMMAND,
     VOICE_MUSIC_PATH,
@@ -111,16 +115,34 @@ def check_configuration() -> list[str]:
         failures.append(f"Piper executable is not available: {piper_executable}")
 
     if music_backend not in {"", "off", "none", "disabled"}:
-        if music_backend != "command":
-            failures.append(f"voice.music_backend is {VOICE_MUSIC_BACKEND!r}; expected 'off' or 'command'.")
+        if music_backend not in {"command", "mpv"}:
+            failures.append(f"voice.music_backend is {VOICE_MUSIC_BACKEND!r}; expected 'off', 'command', or 'mpv'.")
         if not VOICE_MUSIC_PATH.strip():
             failures.append("voice.music_path is empty.")
         elif not resolve_repo_path(VOICE_MUSIC_PATH).exists():
-            failures.append(f"Waiting music file does not exist: {VOICE_MUSIC_PATH}")
-        music_command = format_music_command(VOICE_MUSIC_COMMAND, VOICE_MUSIC_PATH)
-        music_player = shlex.split(music_command)[0] if music_command.strip() else ""
-        if music_player and shutil.which(music_player) is None:
-            failures.append(f"Waiting music player is not available: {music_player}")
+            failures.append(f"Music file does not exist: {VOICE_MUSIC_PATH}")
+        if music_backend == "command":
+            music_command = format_music_command(VOICE_MUSIC_COMMAND, VOICE_MUSIC_PATH)
+            music_player = shlex.split(music_command)[0] if music_command.strip() else ""
+            if music_player and shutil.which(music_player) is None:
+                failures.append(f"Waiting music player is not available: {music_player}")
+        elif music_backend == "mpv" and shutil.which("mpv") is None:
+            failures.append("mpv is not available, but voice.music_backend is 'mpv'.")
+
+    if INTERMISSION_ENABLED:
+        intermission_backend = INTERMISSION_TTS_BACKEND.strip().lower()
+        if intermission_backend not in {"command", "primary"}:
+            failures.append(
+                f"intermission.tts_backend is {INTERMISSION_TTS_BACKEND!r}; expected 'command' or 'primary'."
+            )
+        if intermission_backend == "command":
+            model_path = command_option(INTERMISSION_TTS_COMMAND, "--model")
+            if model_path and not resolve_repo_path(model_path).exists() and not INTERMISSION_FALLBACK_TO_PRIMARY_TTS:
+                failures.append(f"Intermission TTS model does not exist: {model_path}")
+            executable = command_option(INTERMISSION_TTS_COMMAND, "--executable") or "piper"
+            if INTERMISSION_TTS_COMMAND and "piper_tts_command.py" in INTERMISSION_TTS_COMMAND:
+                if shutil.which(executable) is None:
+                    failures.append(f"Intermission Piper executable is not available: {executable}")
 
     return failures
 
@@ -202,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"TTS command: {VOICE_TTS_COMMAND}")
     print(f"Music backend: {VOICE_MUSIC_BACKEND}")
     print(f"Music path: {VOICE_MUSIC_PATH}")
+    print(f"Intermission enabled: {INTERMISSION_ENABLED}")
+    print(f"Intermission TTS backend: {INTERMISSION_TTS_BACKEND}")
 
     failures = check_configuration()
     if failures:

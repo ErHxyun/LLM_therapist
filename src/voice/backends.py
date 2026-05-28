@@ -1,5 +1,6 @@
 import subprocess
 import os
+import signal
 import selectors
 import tempfile
 import threading
@@ -41,11 +42,14 @@ from src.utils.config_loader import (
     VOICE_TTS_TIMEOUT_SEC,
 )
 from src.utils.log_util import get_logger
-from src.voice.sentence_stream import iter_tts_chunks
 
 logger = get_logger("VoiceBackends")
 PLAYBACK_START_MARKER = "__CAITI_TTS_PLAYBACK_START__"
 PLAYBACK_END_MARKER = "__CAITI_TTS_PLAYBACK_END__"
+
+
+class VoiceInterrupted(RuntimeError):
+    """Raised when an active voice backend is interrupted by session pause/stop."""
 
 
 class STTBackend(Protocol):
@@ -55,10 +59,10 @@ class STTBackend(Protocol):
 
 class TTSBackend(Protocol):
     def speak(self, text: str) -> None:
-        """Speak one text chunk."""
+        """Speak one text block."""
 
     def speak_stream(self, text: str) -> None:
-        """Speak text in sentence-sized chunks."""
+        """Speak one complete text block."""
 
 
 @dataclass
@@ -82,8 +86,7 @@ class ConsoleTTS:
             print(f"[{self.prefix}] {chunk}", flush=True)
 
     def speak_stream(self, text: str) -> None:
-        for chunk in iter_tts_chunks(text):
-            self.speak(chunk)
+        self.speak(text)
 
 
 @dataclass
@@ -138,6 +141,14 @@ class FasterWhisperSTT:
     save_wav: str = ""
     _model: Any = field(default=None, init=False, repr=False)
     _model_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _interrupt_check: Callable[[], bool] | None = field(default=None, init=False, repr=False)
+    last_audio_duration_sec: float = field(default=0.0, init=False)
+
+    def set_interrupt_check(self, checker: Callable[[], bool] | None) -> None:
+        self._interrupt_check = checker
+
+    def _should_interrupt(self) -> bool:
+        return bool(self._interrupt_check is not None and self._interrupt_check())
 
     def warm_up(self) -> None:
         self._get_model()
@@ -162,6 +173,8 @@ class FasterWhisperSTT:
         return self._model
 
     def _record(self, wav_file: str) -> None:
+        if self._should_interrupt():
+            raise VoiceInterrupted("STT interrupted before recording.")
         if self.auto_stop:
             whisper_stt.record_wav_auto_stop(
                 wav_file,
@@ -178,7 +191,10 @@ class FasterWhisperSTT:
                 min_record_seconds=self.min_record_seconds,
                 no_speech_timeout_sec=self.no_speech_timeout_sec,
                 chunk_ms=self.vad_chunk_ms,
+                should_stop=self._should_interrupt,
             )
+            if self._should_interrupt():
+                raise VoiceInterrupted("STT interrupted during recording.")
             return
 
         whisper_stt.record_wav(
@@ -189,6 +205,8 @@ class FasterWhisperSTT:
             device=self.audio_device,
             timeout_sec=VOICE_STT_TIMEOUT_SEC,
         )
+        if self._should_interrupt():
+            raise VoiceInterrupted("STT interrupted during recording.")
 
     def _make_wav_file(self) -> tuple[str, bool]:
         if self.save_wav:
@@ -200,13 +218,20 @@ class FasterWhisperSTT:
         return wav_file, True
 
     def _transcribe(self, wav_file: str) -> str:
-        if self.debug_audio:
+        if self._should_interrupt():
+            raise VoiceInterrupted("STT interrupted before transcription.")
+        metrics = {}
+        try:
             metrics = whisper_stt.analyze_wav(wav_file)
+            self.last_audio_duration_sec = float(metrics.get("duration_sec", 0.0))
+        except Exception:
+            self.last_audio_duration_sec = 0.0
+        if self.debug_audio:
             logger.info(
                 "STT audio duration=%.2fs rms=%.1fdBFS peak=%.1fdBFS",
-                metrics["duration_sec"],
-                metrics["rms_dbfs"],
-                metrics["peak_dbfs"],
+                self.last_audio_duration_sec,
+                metrics.get("rms_dbfs", -120.0),
+                metrics.get("peak_dbfs", -120.0),
             )
         transcript = whisper_stt.transcribe_wav_with_model(
             self._get_model(),
@@ -217,6 +242,8 @@ class FasterWhisperSTT:
             initial_prompt=self.initial_prompt,
             vad_filter=self.vad_filter,
         )
+        if self._should_interrupt():
+            raise VoiceInterrupted("STT interrupted after transcription.")
         transcript = transcript.strip()
         logger.info("Persistent STT produced transcript length=%s", len(transcript))
         return transcript
@@ -254,9 +281,16 @@ class CommandTTS:
     timeout_sec: int = 60
     runner: Callable = subprocess.run
     _playback_status_hook: Callable[[bool], None] | None = field(default=None, init=False, repr=False)
+    _interrupt_check: Callable[[], bool] | None = field(default=None, init=False, repr=False)
 
     def set_playback_status_hook(self, hook: Callable[[bool], None] | None) -> None:
         self._playback_status_hook = hook
+
+    def set_interrupt_check(self, checker: Callable[[], bool] | None) -> None:
+        self._interrupt_check = checker
+
+    def _should_interrupt(self) -> bool:
+        return bool(self._interrupt_check is not None and self._interrupt_check())
 
     def speak(self, text: str) -> None:
         chunk = str(text or "").strip()
@@ -264,9 +298,11 @@ class CommandTTS:
             return
         if not self.command.strip():
             raise ValueError("CommandTTS requires a non-empty command.")
+        if self._should_interrupt():
+            raise VoiceInterrupted("TTS interrupted before playback.")
         if self._playback_status_hook is not None:
             self._speak_with_playback_markers(chunk, self._playback_status_hook)
-            logger.info("TTS command spoke chunk length=%s", len(chunk))
+            logger.info("TTS command spoke block length=%s", len(chunk))
             return
         completed = self.runner(
             self.command,
@@ -276,10 +312,12 @@ class CommandTTS:
             text=True,
             timeout=self.timeout_sec,
         )
+        if self._should_interrupt():
+            raise VoiceInterrupted("TTS interrupted after playback.")
         if completed.returncode != 0:
             stderr = (completed.stderr or "").strip()
             raise RuntimeError(f"TTS command failed with code {completed.returncode}: {stderr}")
-        logger.info("TTS command spoke chunk length=%s", len(chunk))
+        logger.info("TTS command spoke block length=%s", len(chunk))
 
     def _speak_with_playback_markers(self, chunk: str, hook: Callable[[bool], None]) -> None:
         env = os.environ.copy()
@@ -293,6 +331,7 @@ class CommandTTS:
             text=True,
             env=env,
             bufsize=1,
+            start_new_session=True,
         )
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
@@ -317,8 +356,11 @@ class CommandTTS:
 
             deadline = time.monotonic() + self.timeout_sec
             while selector.get_map():
+                if self._should_interrupt():
+                    self._terminate_process_tree(process)
+                    raise VoiceInterrupted("TTS interrupted during playback.")
                 if time.monotonic() > deadline:
-                    process.kill()
+                    self._terminate_process_tree(process, force=True)
                     raise subprocess.TimeoutExpired(self.command, self.timeout_sec)
                 events = selector.select(timeout=0.1)
                 if not events and process.poll() is not None:
@@ -352,9 +394,31 @@ class CommandTTS:
             stderr = "".join(stderr_chunks).strip()
             raise RuntimeError(f"TTS command failed with code {returncode}: {stderr}")
 
+    @staticmethod
+    def _terminate_process_tree(process: subprocess.Popen, force: bool = False) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        except Exception:
+            try:
+                process.kill() if force else process.terminate()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            process.wait(timeout=1)
+
     def speak_stream(self, text: str) -> None:
-        for chunk in iter_tts_chunks(text):
-            self.speak(chunk)
+        self.speak(text)
 
 
 def build_stt() -> STTBackend:

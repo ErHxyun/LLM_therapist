@@ -21,7 +21,7 @@ from src.utils.config_loader import (
 )
 from src.utils.config_loader import RECORD_CSV
 from src.utils.io_question_lib import load_question_lib, save_question_lib, generate_results
-from src.utils.io_record import init_record, log_question, log_system_message, set_question_prefix
+from src.utils.io_record import RECORD_LOCK, init_record, log_question, log_system_message, set_question_prefix
 from src.utils.rl_qtables import (
     initialize_q_table,
     choose_action,
@@ -170,6 +170,7 @@ class HandlerRL:
                 self.question_lib,
                 int(A),
                 turn_records=self.new_response,
+                session_control=self.session_control,
             )
             action_turn_records = self.new_response[turn_start:]
             primary_turn = action_turn_records[-1] if action_turn_records else {}
@@ -363,12 +364,13 @@ class HandlerRL:
     def _unlock_question_if_stuck(self) -> None:
         """If Question_Lock remains set after a system message, clear it to avoid blocking."""
         try:
-            df = pd.read_csv(RECORD_CSV)
-            if int(df.loc[0, "Question_Lock"]) == 1:
-                df.loc[0, "Question_Lock"] = 0
-                tmp_path = RECORD_CSV + ".tmp"
-                df.to_csv(tmp_path, index=False)
-                os.replace(tmp_path, RECORD_CSV)
-                logger.info("Force-unlocked Question_Lock after system message.")
+            with RECORD_LOCK:
+                df = pd.read_csv(RECORD_CSV)
+                if int(df.loc[0, "Question_Lock"]) == 1:
+                    df.loc[0, "Question_Lock"] = 0
+                    tmp_path = f"{RECORD_CSV}.{os.getpid()}.{time.time_ns()}.tmp"
+                    df.to_csv(tmp_path, index=False)
+                    os.replace(tmp_path, RECORD_CSV)
+                    logger.info("Force-unlocked Question_Lock after system message.")
         except Exception as e:
             logger.warning(f"Failed to force-unlock Question_Lock: {e}")
