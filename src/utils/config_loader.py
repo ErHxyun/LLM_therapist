@@ -23,6 +23,7 @@ VOICE = _CFG.get("voice", {})
 HARDWARE = _CFG.get("hardware", {})
 MONITOR = _CFG.get("monitor", {})
 INTERMISSION = _CFG.get("intermission", {})
+EMOTION = _CFG.get("emotion", {})
 
 SUBJECT_ID = str(APP["subject_id"])
 
@@ -282,6 +283,32 @@ INTERMISSION_TRANSITION_DELAY_SEC = float(
         str(INTERMISSION.get("transition_delay_sec", 2.0)),
     )
 )
+
+EMOTION_ENABLED = _bool_env("CAITI_EMOTION_ENABLED", EMOTION.get("enabled", False))
+EMOTION_SERVICE_URL = os.environ.get(
+    "CAITI_EMOTION_SERVICE_URL",
+    str(EMOTION.get("service_url", "")),
+).strip()
+EMOTION_USER_ID = _expand(
+    os.environ.get("CAITI_EMOTION_USER_ID", str(EMOTION.get("user_id", SUBJECT_ID)))
+)
+EMOTION_LANGUAGE = os.environ.get("CAITI_EMOTION_LANGUAGE", str(EMOTION.get("language", "en")))
+EMOTION_TIMEOUT_SEC = float(
+    os.environ.get("CAITI_EMOTION_TIMEOUT_SEC", str(EMOTION.get("timeout_sec", 10.0)))
+)
+EMOTION_RESULTS_JSONL_PATH = _expand(
+    os.environ.get(
+        "CAITI_EMOTION_RESULTS_JSONL_PATH",
+        str(EMOTION.get("results_jsonl_path", os.path.join(DATA_DIR, "emotion", "results.jsonl"))),
+    )
+)
+EMOTION_AUDIO_DIR = _expand(
+    os.environ.get(
+        "CAITI_EMOTION_AUDIO_DIR",
+        str(EMOTION.get("audio_dir", os.path.join(DATA_DIR, "emotion", "audio"))),
+    )
+)
+EMOTION_KEEP_AUDIO = _bool_env("CAITI_EMOTION_KEEP_AUDIO", EMOTION.get("keep_audio", False))
 
 HARDWARE_STATUS_LEDS_ENABLED = _bool_env(
     "CAITI_STATUS_LEDS_ENABLED",

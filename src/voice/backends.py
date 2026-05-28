@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from scripts import faster_whisper_stt_command as whisper_stt
+from src.emotion import build_emotion_side_channel
 from src.utils.config_loader import (
     VOICE_STT_AUDIO_DEVICE,
     VOICE_STT_BACKEND,
@@ -142,6 +143,7 @@ class FasterWhisperSTT:
     _model: Any = field(default=None, init=False, repr=False)
     _model_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _interrupt_check: Callable[[], bool] | None = field(default=None, init=False, repr=False)
+    _emotion_side_channel: Any = field(default=None, init=False, repr=False)
     last_audio_duration_sec: float = field(default=0.0, init=False)
 
     def set_interrupt_check(self, checker: Callable[[], bool] | None) -> None:
@@ -149,6 +151,11 @@ class FasterWhisperSTT:
 
     def _should_interrupt(self) -> bool:
         return bool(self._interrupt_check is not None and self._interrupt_check())
+
+    def _get_emotion_side_channel(self):
+        if self._emotion_side_channel is None:
+            self._emotion_side_channel = build_emotion_side_channel()
+        return self._emotion_side_channel
 
     def warm_up(self) -> None:
         self._get_model()
@@ -246,7 +253,19 @@ class FasterWhisperSTT:
             raise VoiceInterrupted("STT interrupted after transcription.")
         transcript = transcript.strip()
         logger.info("Persistent STT produced transcript length=%s", len(transcript))
+        self._send_emotion_analysis(wav_file, transcript)
         return transcript
+
+    def _send_emotion_analysis(self, wav_file: str, transcript: str) -> None:
+        try:
+            self._get_emotion_side_channel().analyze_async(
+                audio_file_path=wav_file,
+                transcript=transcript,
+                sample_rate=self.sample_rate,
+                duration_seconds=self.last_audio_duration_sec,
+            )
+        except Exception as exc:
+            logger.warning("Emotion side-channel dispatch failed: %s", exc)
 
     def listen(self) -> str:
         wav_file, cleanup = self._make_wav_file()

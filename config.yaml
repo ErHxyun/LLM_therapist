@@ -115,6 +115,18 @@ intermission:
   bridge_text: "Caiti is ready now. Let's come back to the main questions."
   transition_delay_sec: 2.0
 
+emotion:
+  # Optional side-channel to xxue752-nz/emo_module.
+  # This never enters LLM prompts and never changes RL/CBT scoring.
+  enabled: false
+  service_url: "http://127.0.0.1:8000/analyze"
+  user_id: "${subject_id}"
+  language: "en"
+  timeout_sec: 10
+  results_jsonl_path: "data/emotion/results.jsonl"
+  audio_dir: "data/emotion/audio"
+  keep_audio: false
+
 hardware:
   # Optional Jetson 40-pin header controls.
   # LED wiring: BOARD pin -- resistor -- LED -- GND for active-high LEDs.

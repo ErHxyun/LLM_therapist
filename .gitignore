@@ -6,6 +6,7 @@ LLM_therapist_paper.pdf
 .env
 data/results
 data/logs
+data/emotion/
 data/record.csv
 data/phq_gad_results.json
 data/q_tables/item_qtable_*.csv

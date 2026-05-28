@@ -310,6 +310,16 @@ intermission:
   persist_results: true
   db_path: ""
   results_json_path: "data/phq_gad_results.json"
+
+emotion:
+  enabled: false
+  service_url: "http://127.0.0.1:8000/analyze"
+  user_id: "${subject_id}"
+  language: "en"
+  timeout_sec: 10
+  results_jsonl_path: "data/emotion/results.jsonl"
+  audio_dir: "data/emotion/audio"
+  keep_audio: false
 ```
 
 The `faster_whisper` backend loads Whisper once and reuses it across turns. It
@@ -348,6 +358,14 @@ turn. The
 intermission voice is configured separately;
 until the male Piper model is present, `fallback_to_primary_tts: true` keeps
 the app audible with CaiTI's primary voice.
+
+The emotion module is an optional side-channel for the external
+`xxue752-nz/emo_module` FastAPI service. When `emotion.enabled: true`, each
+successful STT turn is copied to `data/emotion/audio`, sent asynchronously with
+the transcript to `/analyze`, and appended to `data/emotion/results.jsonl`.
+The external service must be able to read the local `audio_file_path` sent in
+the request. Emotion outputs never enter LLM prompts, `record.csv`, RL/CBT
+scoring, or final reports.
 
 To temporarily fall back to console input/output:
 
@@ -417,6 +435,7 @@ python scripts/faster_whisper_stt_command.py \
 - `data/record.csv`: local question/response exchange file used by console, server, and voice shells.
 - `data/logs/session_events.sqlite3`: structured event log for LLM calls, key flow events, and isolated intermission PHQ/GAD item records.
 - `data/phq_gad_results.json`: JSON mirror of private intermission PHQ-2/GAD-4 item records and per-scale totals.
+- `data/emotion/results.jsonl`: optional emotion side-channel responses from the external emotion service.
 - `data/results/Report_${subject_id}.csv`: final report with `Score`, `Responses`, `Analysis`.
 - `data/results/Notes_${subject_id}.csv`: auxiliary notes output.
 - `data/q_tables/item_qtable_${subject_id}.csv`: learned item Q-table.
