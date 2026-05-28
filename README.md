@@ -327,6 +327,9 @@ records until the user starts speaking and then stops after sustained silence
 plus a short trailing pad, with `stt_record_seconds` acting as the maximum
 capture window. `stt_vad_detector: "auto"` uses WebRTC VAD when `webrtcvad` is
 installed and falls back to the older dBFS detector otherwise.
+STT code is split under `src/voice/stt/`: command/console adapters live in
+`command.py`, the persistent Faster-Whisper backend lives in
+`faster_whisper.py`, and recorder helpers live in `recorder.py`.
 
 If you switch back to the `command` STT backend, STT commands must write
 transcripts to stdout. TTS commands must read text from stdin and play audio
