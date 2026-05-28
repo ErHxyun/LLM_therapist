@@ -69,7 +69,7 @@ voice:
   stt_vad_chunk_ms: 30
   stt_silence_threshold_dbfs: -45
   stt_silence_timeout_sec: 1.2
-  stt_trailing_pad_sec: 0.4
+  stt_trailing_pad_sec: 1
   stt_min_speech_seconds: 0.25
   stt_min_record_seconds: 1.0
   stt_no_speech_timeout_sec: 5.0
