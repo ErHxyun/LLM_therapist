@@ -50,7 +50,7 @@ voice:
   # STT converts microphone audio to text before the LLM pipeline; TTS speaks text after generation.
   stt_backend: "faster_whisper" # console | command | faster_whisper
   tts_backend: "command" # console | command
-  stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 30 --audio-device plughw:0,0 --stt-device cpu --compute-type int8 --beam-size 5 --best-of 5 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --trailing-pad-sec 0.4 --no-speech-timeout-sec 5"
+  stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 30 --audio-device plughw:0,0 --stt-device cpu --compute-type int8 --beam-size 1 --best-of 1 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --trailing-pad-sec 0.4 --no-speech-timeout-sec 5"
   stt_whisper_model: "small.en"
   stt_record_seconds: 30
   stt_sample_rate: 16000
@@ -58,8 +58,9 @@ voice:
   stt_audio_device: "plughw:0,0"
   stt_device: "cpu"
   stt_compute_type: "int8"
-  stt_beam_size: 5
-  stt_best_of: 5
+  # Interactive latency profile: raise these to 5 for slower, more exhaustive decoding.
+  stt_beam_size: 1
+  stt_best_of: 1
   stt_language: "en"
   stt_initial_prompt: "The speaker is answering CaiTI daily functioning screening questions in English. Common words include doctor, therapist, case manager, medication, mood, sleep, appetite, hygiene, chores, work, school, family, alcohol, drugs, safety, and daily life."
   stt_vad_filter: true
@@ -69,11 +70,11 @@ voice:
   stt_vad_chunk_ms: 30
   stt_silence_threshold_dbfs: -45
   stt_silence_timeout_sec: 1.2
-  stt_trailing_pad_sec: 1
+  stt_trailing_pad_sec: 0.4
   stt_min_speech_seconds: 0.25
   stt_min_record_seconds: 1.0
   stt_no_speech_timeout_sec: 5.0
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.6"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.4"
   stt_timeout_sec: 120
   tts_timeout_sec: 60
   empty_transcript_retries: 2

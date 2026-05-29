@@ -275,8 +275,8 @@ voice:
   stt_audio_device: "plughw:0,0"
   stt_device: "cpu"
   stt_compute_type: "int8"
-  stt_beam_size: 5
-  stt_best_of: 5
+  stt_beam_size: 1
+  stt_best_of: 1
   stt_vad_filter: true
   stt_auto_stop: true
   stt_vad_detector: "auto"
@@ -296,7 +296,7 @@ voice:
 intermission:
   enabled: true
   tts_backend: "command"
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.4"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6"
   fallback_to_primary_tts: true
   screening_enabled: true
   breathing_enabled: true
@@ -430,8 +430,8 @@ python scripts/faster_whisper_stt_command.py \
   --audio-device plughw:0,0 \
   --stt-device cpu \
   --compute-type int8 \
-  --beam-size 5 \
-  --best-of 5 \
+  --beam-size 1 \
+  --best-of 1 \
   --vad-filter \
   --auto-stop \
   --debug-audio \
