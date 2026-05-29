@@ -51,6 +51,7 @@ See [docs/jetson_deployment.md](docs/jetson_deployment.md) for the Jetson deploy
 |   `-- jetson_codex_handoff_report.md
 |-- scripts/
 |   |-- benchmark_jetson.py               # Local LLM latency/memory benchmark
+|   |-- benchmark_stt.py                  # Fixed-audio Faster-Whisper STT benchmark
 |   |-- faster_whisper_stt_command.py     # Local microphone recording + Faster-Whisper STT command
 |   |-- long_session_reliability.py       # Mocked full 37-dimension + CBT reliability run
 |   |-- piper_tts_command.py              # Local Piper TTS command
@@ -194,6 +195,7 @@ Purpose:
 - Voice smoke dry-run verifies command configuration, Piper model path, and local tools without recording or playback.
 - Adapter smoke test loads the real local model and checks all six task adapters.
 - Jetson benchmark records model load time, per-task latency, adapter switch latency, memory snapshots, and contract failures.
+- STT benchmark compares Faster-Whisper latency and transcripts on fixed WAV files without running the CaiTI session pipeline.
 - Long-session reliability runs a deterministic mocked full 37-dimension session plus CBT and checks record locks, report rows, SQLite events, and memory snapshots.
 
 On the target Jetson with a microphone and speaker attached, run the real voice smoke test:
@@ -207,6 +209,36 @@ Benchmark reports are written to `data/results/jetson_benchmark_*.json`:
 ```bash
 CAITI_DEVICE_MAP=cuda:0 python scripts/benchmark_jetson.py --iterations 3 --warmup 1
 ```
+
+STT benchmark audio should be fixed WAV files, usually saved under
+`data/benchmark/stt/`. For example, record a standard answer once:
+
+```bash
+python scripts/faster_whisper_stt_command.py \
+  --model small.en \
+  --record-seconds 30 \
+  --audio-device plughw:0,0 \
+  --stt-device cpu \
+  --compute-type int8 \
+  --beam-size 1 \
+  --best-of 1 \
+  --vad-filter \
+  --auto-stop \
+  --save-wav data/benchmark/stt/sleep_answer.wav
+```
+
+Then compare STT settings on the same audio without touching the main session:
+
+```bash
+python scripts/benchmark_stt.py \
+  --audio-dir data/benchmark/stt \
+  --model small.en \
+  --model base.en \
+  --vad-filter-mode both \
+  --iterations 3
+```
+
+Reports are written to `data/results/stt_benchmark_*.jsonl` and `.csv`.
 
 Long-session reliability artifacts are written to `data/results/long_session_reliability_*`:
 

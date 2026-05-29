@@ -5,6 +5,7 @@ LLM_therapist_paper.pdf
 .DS_Store
 .env
 data/results
+data/benchmark/
 data/logs
 data/emotion/
 data/record.csv
