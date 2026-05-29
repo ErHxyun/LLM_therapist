@@ -63,6 +63,8 @@ class VoiceIOTests(unittest.TestCase):
         tts = CommandTTS("local-tts", runner=runner)
         tts.speak_stream("One. Two?")
         self.assertEqual(spoken, ["One. Two?"])
+        self.assertFalse(tts.last_timing["used_playback_markers"])
+        self.assertEqual(tts.last_timing["text_length"], len("One. Two?"))
 
     def test_command_tts_uses_playback_markers_for_status_hook(self):
         events = []
@@ -79,6 +81,9 @@ class VoiceIOTests(unittest.TestCase):
         tts.speak("Hello.")
 
         self.assertEqual(events, [True, False])
+        self.assertTrue(tts.last_timing["used_playback_markers"])
+        self.assertEqual(tts.last_timing["text_length"], len("Hello."))
+        self.assertGreaterEqual(tts.last_timing["total_duration_sec"], 0.0)
 
     def test_command_backend_raises_on_failure(self):
         def runner(*args, **kwargs):

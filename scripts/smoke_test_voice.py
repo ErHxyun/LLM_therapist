@@ -39,7 +39,7 @@ from src.utils.config_loader import (  # noqa: E402
     VOICE_TTS_TIMEOUT_SEC,
 )
 from scripts import piper_tts_command as piper_tts  # noqa: E402
-from src.voice.backends import build_stt  # noqa: E402
+from src.voice.backends import build_stt, build_tts  # noqa: E402
 from src.voice.music import format_music_command  # noqa: E402
 
 
@@ -83,8 +83,10 @@ def check_configuration() -> list[str]:
         failures.append(
             f"voice.stt_backend is {VOICE_STT_BACKEND!r}; expected 'command' or 'faster_whisper'."
         )
-    if tts_backend != "command":
-        failures.append(f"voice.tts_backend is {VOICE_TTS_BACKEND!r}; expected 'command'.")
+    if tts_backend not in {"command", "piper", "persistent_piper", "persistent-piper"}:
+        failures.append(
+            f"voice.tts_backend is {VOICE_TTS_BACKEND!r}; expected 'command' or 'persistent_piper'."
+        )
     if stt_backend == "command" and not VOICE_STT_COMMAND.strip():
         failures.append("voice.stt_command is empty.")
     if not VOICE_TTS_COMMAND.strip():
@@ -110,8 +112,10 @@ def check_configuration() -> list[str]:
         failures.append(f"Audio player is not available: {player}")
 
     piper_executable = command_option(VOICE_TTS_COMMAND, "--executable") or "piper"
-    if VOICE_TTS_COMMAND and "piper_tts_command.py" in VOICE_TTS_COMMAND and shutil.which(piper_executable) is None:
+    if tts_backend == "command" and VOICE_TTS_COMMAND and "piper_tts_command.py" in VOICE_TTS_COMMAND and shutil.which(piper_executable) is None:
         failures.append(f"Piper executable is not available: {piper_executable}")
+    if tts_backend in {"piper", "persistent_piper", "persistent-piper"} and not _has_module("piper"):
+        failures.append("Python package piper is not importable.")
 
     if music_backend not in {"", "off", "none", "disabled"}:
         if music_backend not in {"command", "mpv"}:
@@ -130,11 +134,11 @@ def check_configuration() -> list[str]:
 
     if INTERMISSION_ENABLED:
         intermission_backend = INTERMISSION_TTS_BACKEND.strip().lower()
-        if intermission_backend not in {"command", "primary"}:
+        if intermission_backend not in {"command", "piper", "persistent_piper", "persistent-piper", "primary"}:
             failures.append(
-                f"intermission.tts_backend is {INTERMISSION_TTS_BACKEND!r}; expected 'command' or 'primary'."
+                f"intermission.tts_backend is {INTERMISSION_TTS_BACKEND!r}; expected 'command', 'persistent_piper', or 'primary'."
             )
-        if intermission_backend == "command":
+        if intermission_backend in {"command", "piper", "persistent_piper", "persistent-piper"}:
             failures.extend(
                 _validate_piper_command(
                     INTERMISSION_TTS_COMMAND,
@@ -143,9 +147,11 @@ def check_configuration() -> list[str]:
                 )
             )
             executable = command_option(INTERMISSION_TTS_COMMAND, "--executable") or "piper"
-            if INTERMISSION_TTS_COMMAND and "piper_tts_command.py" in INTERMISSION_TTS_COMMAND:
+            if intermission_backend == "command" and INTERMISSION_TTS_COMMAND and "piper_tts_command.py" in INTERMISSION_TTS_COMMAND:
                 if shutil.which(executable) is None:
                     failures.append(f"Intermission Piper executable is not available: {executable}")
+            if intermission_backend in {"piper", "persistent_piper", "persistent-piper"} and not _has_module("piper"):
+                failures.append("Python package piper is not importable for intermission TTS.")
 
     return failures
 
@@ -179,13 +185,25 @@ def run_command(command: str, timeout_sec: int, stdin_text: str = "") -> subproc
 
 def run_tts_smoke(text: str) -> bool:
     print("\n[TTS] Playing a short Piper test sentence...")
-    completed = run_command(VOICE_TTS_COMMAND, VOICE_TTS_TIMEOUT_SEC, text)
-    if completed.returncode == 0:
-        print("[TTS] OK")
-        return True
-    print("[TTS] FAIL")
-    print((completed.stderr or completed.stdout or "").strip())
-    return False
+    if VOICE_TTS_BACKEND.strip().lower() == "command":
+        completed = run_command(VOICE_TTS_COMMAND, VOICE_TTS_TIMEOUT_SEC, text)
+        if completed.returncode != 0:
+            print("[TTS] FAIL")
+            print((completed.stderr or completed.stdout or "").strip())
+            return False
+    else:
+        try:
+            tts = build_tts()
+            warm_up = getattr(tts, "warm_up", None)
+            if callable(warm_up):
+                warm_up()
+            tts.speak(text)
+        except Exception as exc:
+            print("[TTS] FAIL")
+            print(str(exc))
+            return False
+    print("[TTS] OK")
+    return True
 
 
 def run_stt_smoke() -> bool:

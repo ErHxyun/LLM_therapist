@@ -7,6 +7,7 @@ with a local audio player. Designed for CAITI_TTS_COMMAND.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -19,7 +20,9 @@ from typing import Callable, Sequence
 PLAYBACK_START_MARKER = "__CAITI_TTS_PLAYBACK_START__"
 PLAYBACK_END_MARKER = "__CAITI_TTS_PLAYBACK_END__"
 ESPEAK_FALLBACK = "espeak-ng"
-CACHED_FALLBACK_WAV = Path(__file__).resolve().parents[1] / "assets" / "audio" / "tts_fallback.wav"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CACHED_FALLBACK_WAV = REPO_ROOT / "assets" / "audio" / "tts_fallback.wav"
+DEFAULT_CACHE_DIR = REPO_ROOT / "data" / "cache" / "tts"
 
 
 def build_piper_command(
@@ -104,6 +107,55 @@ def _is_valid_wav(wav_file: str) -> bool:
     return Path(wav_file).exists() and Path(wav_file).stat().st_size > 44
 
 
+def _file_fingerprint(path: Path) -> dict[str, str | int | None]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"path": str(path), "size": None, "mtime_ns": None}
+    return {"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def build_cache_key(
+    text: str,
+    model_path: str,
+    executable: str,
+    length_scale: float,
+    sentence_silence: float,
+) -> str:
+    model = Path(model_path).expanduser().resolve()
+    payload = {
+        "text": text,
+        "model": _file_fingerprint(model),
+        "model_config": _file_fingerprint(Path(f"{model}.json")),
+        "executable": executable,
+        "length_scale": length_scale,
+        "sentence_silence": sentence_silence,
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def cache_wav_path(
+    cache_dir: str | os.PathLike[str] | None,
+    text: str,
+    model_path: str,
+    executable: str,
+    length_scale: float,
+    sentence_silence: float,
+) -> Path | None:
+    if not cache_dir:
+        return None
+    key = build_cache_key(text, model_path, executable, length_scale, sentence_silence)
+    return Path(cache_dir).expanduser() / f"{key}.wav"
+
+
+def store_wav_in_cache(source_wav: str, cache_path: Path) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
+    shutil.copyfile(source_wav, tmp_path)
+    os.replace(tmp_path, cache_path)
+
+
 def speak_text(
     text: str,
     model_path: str,
@@ -115,47 +167,57 @@ def speak_text(
     emit_playback_markers: bool = False,
     fallback_executable: str = ESPEAK_FALLBACK,
     cached_fallback_wav: str | os.PathLike[str] | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
     text = str(text or "").strip()
     if not text:
         return
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        wav_file = tmp.name
+    cache_path = cache_wav_path(cache_dir, text, model_path, executable, length_scale, sentence_silence)
+    cleanup = False
+    if cache_path is not None and _is_valid_wav(str(cache_path)):
+        wav_file = str(cache_path)
+    else:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            wav_file = tmp.name
+        cleanup = True
 
     try:
         piper_error: Exception | None = None
-        try:
-            validate_piper_voice(model_path)
-            piper_cmd = build_piper_command(
-                executable,
-                model_path,
-                wav_file,
-                length_scale,
-                sentence_silence,
-            )
-            completed = runner(
-                piper_cmd,
-                input=text,
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError((completed.stderr or "").strip() or "Piper TTS failed.")
-            if not _is_valid_wav(wav_file):
-                raise RuntimeError("Piper produced an empty or invalid WAV file.")
-        except Exception as exc:
-            piper_error = exc
-            if not synthesize_espeak_wav(
-                text,
-                wav_file,
-                executable=fallback_executable,
-                timeout_sec=timeout_sec,
-                runner=runner,
-            ) and not copy_cached_fallback_wav(wav_file, cached_fallback_wav):
-                raise RuntimeError(f"Piper TTS failed and no fallback audio is available: {exc}") from exc
+        if cleanup:
+            try:
+                validate_piper_voice(model_path)
+                piper_cmd = build_piper_command(
+                    executable,
+                    model_path,
+                    wav_file,
+                    length_scale,
+                    sentence_silence,
+                )
+                completed = runner(
+                    piper_cmd,
+                    input=text,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                )
+                if completed.returncode != 0:
+                    raise RuntimeError((completed.stderr or "").strip() or "Piper TTS failed.")
+                if not _is_valid_wav(wav_file):
+                    raise RuntimeError("Piper produced an empty or invalid WAV file.")
+                if cache_path is not None:
+                    store_wav_in_cache(wav_file, cache_path)
+            except Exception as exc:
+                piper_error = exc
+                if not synthesize_espeak_wav(
+                    text,
+                    wav_file,
+                    executable=fallback_executable,
+                    timeout_sec=timeout_sec,
+                    runner=runner,
+                ) and not copy_cached_fallback_wav(wav_file, cached_fallback_wav):
+                    raise RuntimeError(f"Piper TTS failed and no fallback audio is available: {exc}") from exc
 
         play_cmd = build_player_command(player, wav_file)
         if emit_playback_markers:
@@ -175,10 +237,11 @@ def speak_text(
         if piper_error is not None:
             print(f"Piper TTS fallback used: {piper_error}", file=sys.stderr)
     finally:
-        try:
-            os.remove(wav_file)
-        except OSError:
-            pass
+        if cleanup:
+            try:
+                os.remove(wav_file)
+            except OSError:
+                pass
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -194,6 +257,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--timeout-sec", type=int, default=int(os.environ.get("CAITI_TTS_TIMEOUT_SEC", "60")))
     parser.add_argument("--fallback-executable", default=os.environ.get("CAITI_TTS_FALLBACK_EXECUTABLE", ESPEAK_FALLBACK))
+    parser.add_argument("--cache-dir", default=os.environ.get("CAITI_TTS_CACHE_DIR", str(DEFAULT_CACHE_DIR)))
+    parser.add_argument("--no-cache", action="store_true", default=False)
     parser.add_argument(
         "--playback-markers",
         action="store_true",
@@ -216,6 +281,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout_sec=args.timeout_sec,
             emit_playback_markers=args.playback_markers,
             fallback_executable=args.fallback_executable,
+            cache_dir=None if args.no_cache else args.cache_dir,
         )
     except Exception as exc:
         print(str(exc), file=sys.stderr)

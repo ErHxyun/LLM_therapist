@@ -6,6 +6,7 @@ LLM_therapist_paper.pdf
 .env
 data/results
 data/benchmark/
+data/cache/
 data/logs
 data/emotion/
 data/record.csv

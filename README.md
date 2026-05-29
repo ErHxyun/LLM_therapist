@@ -301,7 +301,7 @@ The launcher uses `config.yaml` voice defaults:
 ```yaml
 voice:
   stt_backend: "faster_whisper"
-  tts_backend: "command"
+  tts_backend: "persistent_piper"
   stt_whisper_model: "small.en"
   stt_record_seconds: 30
   stt_audio_device: "plughw:0,0"
@@ -327,7 +327,7 @@ voice:
 
 intermission:
   enabled: true
-  tts_backend: "command"
+  tts_backend: "persistent_piper"
   tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6"
   fallback_to_primary_tts: true
   screening_enabled: true
@@ -368,6 +368,12 @@ transcripts to stdout. TTS commands must read text from stdin and play audio
 locally. The bundled Piper command validates both the `.onnx` voice and its
 `.onnx.json` config before playback, then falls back to `espeak-ng` when Piper
 cannot synthesize audio.
+When launched through the command-line script, Piper TTS keeps synthesized WAVs
+under `data/cache/tts`, keyed by text, voice model, and speaking parameters, so
+repeated prompts can replay without resynthesizing.
+The `persistent_piper` backend loads the Python Piper voice model once per role
+and reuses it across turns, while still honoring the configured Piper command's
+model, player, length scale, sentence silence, and cache settings.
 Voice role selection is centralized in `src/voice/tts/router.py`: the main and
 CBT roles use the primary TTS, while intermission prefers its configured voice
 and falls back to the primary TTS when allowed.

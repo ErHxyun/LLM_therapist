@@ -49,7 +49,7 @@ voice:
   # Paper Section 4 keeps semantic analysis text-only. These commands are I/O only:
   # STT converts microphone audio to text before the LLM pipeline; TTS speaks text after generation.
   stt_backend: "faster_whisper" # console | command | faster_whisper
-  tts_backend: "command" # console | command
+  tts_backend: "persistent_piper" # console | command | persistent_piper
   stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 30 --audio-device plughw:0,0 --stt-device cpu --compute-type int8 --beam-size 1 --best-of 1 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --trailing-pad-sec 0.4 --no-speech-timeout-sec 5"
   stt_whisper_model: "small.en"
   stt_record_seconds: 30
@@ -92,7 +92,7 @@ intermission:
   # This layer is isolated from the paper pipeline: it does not write record.csv,
   # does not call the LLM, and does not update RL/CBT scores or user reports.
   enabled: true
-  tts_backend: "command" # command | primary
+  tts_backend: "persistent_piper" # command | persistent_piper | primary
   tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6"
   fallback_to_primary_tts: true
   screening_enabled: true

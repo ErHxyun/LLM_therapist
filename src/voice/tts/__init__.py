@@ -4,6 +4,7 @@ from src.voice.tts.command import (
     CommandTTS,
     ConsoleTTS,
 )
+from src.voice.tts.piper import PersistentPiperTTS
 from src.voice.tts.router import TTSRouteSettings, build_primary_tts, build_role_tts, build_tts_from_settings
 
 __all__ = [
@@ -11,6 +12,7 @@ __all__ = [
     "PLAYBACK_START_MARKER",
     "CommandTTS",
     "ConsoleTTS",
+    "PersistentPiperTTS",
     "TTSRouteSettings",
     "build_primary_tts",
     "build_role_tts",

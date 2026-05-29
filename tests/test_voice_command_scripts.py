@@ -166,6 +166,37 @@ class VoiceCommandScriptTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0][0], "aplay")
 
+    def test_piper_speak_reuses_synthesized_cache(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            model = root / "voice.onnx"
+            model.write_bytes(b"model")
+            Path(f"{model}.json").write_text("{}", encoding="utf-8")
+            cache_dir = root / "cache"
+
+            def runner(command, **kwargs):
+                calls.append((command, kwargs))
+                if command[0] == "piper":
+                    output_file = command[command.index("--output_file") + 1]
+                    Path(output_file).write_bytes(b"RIFF" + b"0" * 80)
+                return _Completed()
+
+            for _ in range(2):
+                tts_script.speak_text(
+                    "Hello.",
+                    model_path=str(model),
+                    executable="piper",
+                    player="aplay",
+                    cache_dir=str(cache_dir),
+                    runner=runner,
+                )
+
+        piper_calls = [call for call in calls if call[0][0] == "piper"]
+        player_calls = [call for call in calls if call[0][0] == "aplay"]
+        self.assertEqual(len(piper_calls), 1)
+        self.assertEqual(len(player_calls), 2)
+
     def test_arecord_command_is_mono_16k_wav(self):
         command = stt_script.build_arecord_command(
             "/tmp/input.wav",

@@ -37,6 +37,7 @@ class CommandTTS:
     runner: Callable = subprocess.run
     _playback_status_hook: Callable[[bool], None] | None = field(default=None, init=False, repr=False)
     _interrupt_check: Callable[[], bool] | None = field(default=None, init=False, repr=False)
+    last_timing: dict[str, float | int | bool] = field(default_factory=dict, init=False)
 
     def set_playback_status_hook(self, hook: Callable[[bool], None] | None) -> None:
         self._playback_status_hook = hook
@@ -57,8 +58,10 @@ class CommandTTS:
             raise VoiceInterrupted("TTS interrupted before playback.")
         if self._playback_status_hook is not None:
             self._speak_with_playback_markers(chunk, self._playback_status_hook)
+            self._log_timing(len(chunk), used_playback_markers=True)
             logger.info("TTS command spoke block length=%s", len(chunk))
             return
+        started_at = time.monotonic()
         completed = self.runner(
             self.command,
             input=chunk,
@@ -67,11 +70,20 @@ class CommandTTS:
             text=True,
             timeout=self.timeout_sec,
         )
+        total_duration_sec = time.monotonic() - started_at
+        self.last_timing = {
+            "total_duration_sec": round(total_duration_sec, 3),
+            "prepare_duration_sec": 0.0,
+            "playback_duration_sec": round(total_duration_sec, 3),
+            "text_length": len(chunk),
+            "used_playback_markers": False,
+        }
         if self._should_interrupt():
             raise VoiceInterrupted("TTS interrupted after playback.")
         if completed.returncode != 0:
             stderr = (completed.stderr or "").strip()
             raise RuntimeError(f"TTS command failed with code {completed.returncode}: {stderr}")
+        self._log_timing(len(chunk), used_playback_markers=False)
         logger.info("TTS command spoke block length=%s", len(chunk))
 
     def _speak_with_playback_markers(self, chunk: str, hook: Callable[[bool], None]) -> None:
@@ -91,12 +103,20 @@ class CommandTTS:
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         playback_active = False
+        started_at = time.monotonic()
+        playback_started_at: float | None = None
+        playback_ended_at: float | None = None
 
         def set_playback_active(active: bool) -> None:
-            nonlocal playback_active
+            nonlocal playback_active, playback_started_at, playback_ended_at
             if playback_active == active:
                 return
             playback_active = active
+            now = time.monotonic()
+            if active:
+                playback_started_at = now
+            else:
+                playback_ended_at = now
             hook(active)
 
         selector = selectors.DefaultSelector()
@@ -148,6 +168,33 @@ class CommandTTS:
         if returncode != 0:
             stderr = "".join(stderr_chunks).strip()
             raise RuntimeError(f"TTS command failed with code {returncode}: {stderr}")
+        finished_at = time.monotonic()
+        prepare_duration = (
+            max(0.0, playback_started_at - started_at) if playback_started_at is not None else finished_at - started_at
+        )
+        playback_duration = (
+            max(0.0, playback_ended_at - playback_started_at)
+            if playback_started_at is not None and playback_ended_at is not None
+            else 0.0
+        )
+        self.last_timing = {
+            "total_duration_sec": round(finished_at - started_at, 3),
+            "prepare_duration_sec": round(prepare_duration, 3),
+            "playback_duration_sec": round(playback_duration, 3),
+            "text_length": len(chunk),
+            "used_playback_markers": True,
+        }
+
+    def _log_timing(self, text_length: int, used_playback_markers: bool) -> None:
+        timing = self.last_timing or {}
+        logger.info(
+            "TTS timing total=%.3fs prepare=%.3fs playback=%.3fs text_length=%s markers=%s",
+            float(timing.get("total_duration_sec", 0.0)),
+            float(timing.get("prepare_duration_sec", 0.0)),
+            float(timing.get("playback_duration_sec", 0.0)),
+            text_length,
+            used_playback_markers,
+        )
 
     @staticmethod
     def _terminate_process_tree(process: subprocess.Popen, force: bool = False) -> None:

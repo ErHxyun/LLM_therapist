@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from src.voice.tts.command import CommandTTS, ConsoleTTS
+from src.voice.tts.piper import PersistentPiperTTS
 from src.voice.tts.router import TTSRouteSettings, build_role_tts, build_tts_from_settings, extract_command_option
 
 
@@ -44,6 +45,31 @@ class TTSRouterTests(unittest.TestCase):
 
         self.assertIsInstance(tts, CommandTTS)
         self.assertEqual(tts.timeout_sec, 12)
+
+    def test_persistent_piper_backend_builds_from_piper_command(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model = Path(tmpdir) / "voice.onnx"
+            model.write_bytes(b"model")
+            Path(f"{model}.json").write_text("{}", encoding="utf-8")
+            tts = build_tts_from_settings(
+                TTSRouteSettings(
+                    role="primary",
+                    backend="persistent_piper",
+                    command=(
+                        f"python scripts/piper_tts_command.py --model {model} "
+                        "--player true --length-scale 1.1 --sentence-silence 0.6 --no-cache"
+                    ),
+                    timeout_sec=12,
+                    strict=True,
+                )
+            )
+
+        self.assertIsInstance(tts, PersistentPiperTTS)
+        self.assertEqual(tts.timeout_sec, 12)
+        self.assertEqual(tts.player, "true")
+        self.assertEqual(tts.length_scale, 1.1)
+        self.assertEqual(tts.sentence_silence, 0.6)
+        self.assertIsNone(tts.cache_dir)
 
     def test_intermission_invalid_piper_voice_falls_back_to_primary(self):
         primary = object()

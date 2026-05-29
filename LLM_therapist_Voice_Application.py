@@ -239,6 +239,23 @@ def _warm_up_stt(stt) -> None:
         logger.warning("STT warm-up failed; first listen will retry. error=%s", exc)
 
 
+def _warm_up_tts(tts, role: str = "primary") -> None:
+    warm_up = getattr(tts, "warm_up", None)
+    if not callable(warm_up):
+        return
+    try:
+        warm_up()
+    except Exception as exc:
+        logger.warning("%s TTS warm-up failed; first playback will retry. error=%s", role, exc)
+
+
+def _warm_up_intermission_tts(intermission_runner, primary_tts) -> None:
+    intermission_tts = getattr(intermission_runner, "tts", None)
+    if intermission_tts is None or intermission_tts is primary_tts:
+        return
+    _warm_up_tts(intermission_tts, "intermission")
+
+
 def _preload_llm_runtime() -> None:
     logger.info("Preloading local CaiTI LLM runtime before first spoken turn.")
     preload_llm_runtime()
@@ -329,6 +346,8 @@ def main():
         if session_control.wait_for_start():
             music.start()
             _preload_llm_runtime()
+            _warm_up_tts(tts)
+            _warm_up_intermission_tts(intermission_runner, tts)
             _warm_up_stt(stt)
             session_control.checkpoint("loading")
             session_control.mark_screening()

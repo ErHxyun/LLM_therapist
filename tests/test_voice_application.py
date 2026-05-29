@@ -498,6 +498,8 @@ class VoiceApplicationTests(unittest.TestCase):
             "wait_for_voice_io_drain": app.wait_for_voice_io_drain,
             "time.sleep": app.time.sleep,
             "_preload_llm_runtime": app._preload_llm_runtime,
+            "_warm_up_tts": app._warm_up_tts,
+            "_warm_up_intermission_tts": app._warm_up_intermission_tts,
             "_warm_up_stt": app._warm_up_stt,
         }
         try:
@@ -513,6 +515,8 @@ class VoiceApplicationTests(unittest.TestCase):
             app.build_volume_button_controller = lambda: FakeVolumeButtons()
             app.HandlerRL = FakeHandler
             app._preload_llm_runtime = lambda: events.append("preload_llm_runtime")
+            app._warm_up_tts = lambda _tts: events.append("warm_up_tts")
+            app._warm_up_intermission_tts = lambda _runner, _tts: events.append("warm_up_intermission_tts")
             app._warm_up_stt = lambda _stt: events.append("warm_up_stt")
             app.threading.Thread = FakeThread
             app.threading.Event = FakeEvent
@@ -537,6 +541,8 @@ class VoiceApplicationTests(unittest.TestCase):
             app.wait_for_voice_io_drain = originals["wait_for_voice_io_drain"]
             app.time.sleep = originals["time.sleep"]
             app._preload_llm_runtime = originals["_preload_llm_runtime"]
+            app._warm_up_tts = originals["_warm_up_tts"]
+            app._warm_up_intermission_tts = originals["_warm_up_intermission_tts"]
             app._warm_up_stt = originals["_warm_up_stt"]
 
         self.assertEqual(
@@ -555,6 +561,8 @@ class VoiceApplicationTests(unittest.TestCase):
                 "session.wait_start",
                 "music.start",
                 "preload_llm_runtime",
+                "warm_up_tts",
+                "warm_up_intermission_tts",
                 "warm_up_stt",
                 "session.checkpoint:loading",
                 "session.mark_screening",
@@ -696,6 +704,8 @@ class VoiceApplicationTests(unittest.TestCase):
             "wait_for_voice_io_drain": app.wait_for_voice_io_drain,
             "time.sleep": app.time.sleep,
             "_preload_llm_runtime": app._preload_llm_runtime,
+            "_warm_up_tts": app._warm_up_tts,
+            "_warm_up_intermission_tts": app._warm_up_intermission_tts,
             "_warm_up_stt": app._warm_up_stt,
             "_speak_shutdown_message": app._speak_shutdown_message,
         }
@@ -712,6 +722,8 @@ class VoiceApplicationTests(unittest.TestCase):
             app.build_volume_button_controller = lambda: FakeVolumeButtons()
             app.HandlerRL = FakeHandler
             app._preload_llm_runtime = lambda: events.append("preload_llm_runtime")
+            app._warm_up_tts = lambda _tts: events.append("warm_up_tts")
+            app._warm_up_intermission_tts = lambda _runner, _tts: events.append("warm_up_intermission_tts")
             app._warm_up_stt = lambda _stt: events.append("warm_up_stt")
             app._speak_shutdown_message = lambda _tts, _music, _status_leds: events.append("speak_shutdown")
             app.threading.Thread = FakeThread
@@ -737,6 +749,8 @@ class VoiceApplicationTests(unittest.TestCase):
             app.wait_for_voice_io_drain = originals["wait_for_voice_io_drain"]
             app.time.sleep = originals["time.sleep"]
             app._preload_llm_runtime = originals["_preload_llm_runtime"]
+            app._warm_up_tts = originals["_warm_up_tts"]
+            app._warm_up_intermission_tts = originals["_warm_up_intermission_tts"]
             app._warm_up_stt = originals["_warm_up_stt"]
             app._speak_shutdown_message = originals["_speak_shutdown_message"]
 
