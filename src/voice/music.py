@@ -435,6 +435,15 @@ class MPVBackgroundMusic:
             self._mode_index = (self._mode_index + 1) % len(self.modes)
             mode = self.modes[self._mode_index]
             self.path = mode.path
+            if was_running and mode.path:
+                switched = self._send_command_locked(["loadfile", mode.path, "replace"])
+                if switched:
+                    self._ducked = was_ducked
+                    self._send_volume_locked(self.duck_volume_percent if was_ducked else self.volume_percent)
+                    self._send_command_locked(["set_property", "pause", was_paused])
+                    self._paused = was_paused
+                    logger.info("Background music mode changed: %s", mode.name)
+                    return mode.name
 
         if was_running:
             self.stop()
@@ -451,14 +460,16 @@ class MPVBackgroundMusic:
     def _send_volume_locked(self, volume_percent: int) -> None:
         self._send_command_locked(["set_property", "volume", int(volume_percent)])
 
-    def _send_command_locked(self, command: list) -> None:
+    def _send_command_locked(self, command: list) -> bool:
         try:
             if self.ipc_sender is not None:
                 self.ipc_sender(self.ipc_path, command)
-                return
+                return True
             _send_mpv_ipc_command(self.ipc_path, command)
+            return True
         except Exception as exc:
             logger.debug("mpv IPC command failed: %s", exc)
+            return False
 
     def _wait_for_ipc_ready(self) -> None:
         if self.ipc_sender is not None:

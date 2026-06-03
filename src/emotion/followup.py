@@ -181,6 +181,7 @@ def assess_emotion_followup(
     audio_valence = metadata["audio_valence"]
     audio_scores = metadata["audio_scores"]
     distressed_voice = _distressed_voice(audio_valence, audio_scores)
+    strong_distressed_voice = _strong_distressed_voice(audio_valence, audio_scores)
     positive_voice = _positive_voice(audio_valence)
 
     if score == 0 and mismatch and distressed_voice and risk >= settings.risk_threshold:
@@ -192,7 +193,7 @@ def assess_emotion_followup(
             metadata,
         )
 
-    if score == 0 and distressed_voice and risk >= settings.light_risk_threshold:
+    if score == 0 and strong_distressed_voice and risk >= settings.risk_threshold:
         metadata["rule"] = "score_0_distressed_acoustic_cue"
         return EmotionFollowupDecision(
             True,
@@ -210,7 +211,7 @@ def assess_emotion_followup(
             metadata,
         )
 
-    if mismatch and risk >= settings.light_risk_threshold:
+    if mismatch and risk >= settings.risk_threshold:
         metadata["rule"] = "light_mismatch"
         return EmotionFollowupDecision(
             True,
@@ -359,6 +360,16 @@ def _distressed_voice(audio_valence: int | None, audio_scores: dict[str, Any]) -
     hesitation = _int_value(audio_scores.get("hesitation"), 0)
     stability = _int_value(audio_scores.get("stability"), 100)
     return tension >= 60 or hesitation >= 70 or stability <= 40
+
+
+def _strong_distressed_voice(audio_valence: int | None, audio_scores: dict[str, Any]) -> bool:
+    tension = _int_value(audio_scores.get("tension"), 0)
+    hesitation = _int_value(audio_scores.get("hesitation"), 0)
+    stability = _int_value(audio_scores.get("stability"), 100)
+    negative_voice = audio_valence is not None and audio_valence < 0
+    strained_delivery = hesitation >= 85 and stability <= 30
+    tense_delivery = tension >= 70 and (hesitation >= 75 or stability <= 35)
+    return (negative_voice and strained_delivery) or tense_delivery
 
 
 def _positive_voice(audio_valence: int | None) -> bool:

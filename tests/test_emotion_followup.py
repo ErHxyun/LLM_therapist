@@ -78,11 +78,11 @@ class EmotionFollowupTest(unittest.TestCase):
             user_text="I'm fine.",
             record=emotion_record(
                 confidence=65,
-                risk=45,
-                audio_emotion=[-1, 1],
+                risk=70,
+                audio_emotion=[-1, -1],
                 context_emotion=[-1, 0],
                 comparison={"audio_vs_context_consistent": True},
-                audio_scores={"tension": 50, "hesitation": 85, "stability": 35},
+                audio_scores={"tension": 50, "hesitation": 90, "stability": 25},
             ),
             settings=self.settings,
         )
@@ -90,6 +90,47 @@ class EmotionFollowupTest(unittest.TestCase):
         self.assertTrue(decision.should_follow_up)
         self.assertEqual(decision.reason, "emotion_distress_acoustic_cue")
         self.assertIn("strained", decision.followup_text)
+
+    def test_score_zero_consistent_mild_acoustic_cue_does_not_trigger_followup(self):
+        decision = assess_emotion_followup(
+            score=0,
+            user_text="I don't really drink any alcohol.",
+            record=emotion_record(
+                confidence=80,
+                risk=53,
+                audio_emotion=[-1, -1],
+                context_emotion=[-1, -1],
+                comparison={"audio_vs_context_consistent": True},
+                audio_scores={"tension": 51, "hesitation": 85, "stability": 36},
+            ),
+            settings=self.settings,
+        )
+
+        self.assertFalse(decision.should_follow_up)
+        self.assertEqual(decision.reason, "emotion_consistent_or_low_risk")
+
+    def test_light_mismatch_low_risk_does_not_trigger_followup(self):
+        decision = assess_emotion_followup(
+            score=0,
+            user_text="Yes, I see my doctor every week and pretty consistently.",
+            record=emotion_record(
+                confidence=80,
+                risk=50,
+                audio_emotion=[-1, -1],
+                context_emotion=[1, -1],
+                comparison={
+                    "audio_vs_context_consistent": False,
+                    "arousal_conflict": True,
+                    "contradiction_or_sarcasm": True,
+                    "valence_conflict": False,
+                },
+                audio_scores={"arousal": 39, "tension": 100, "hesitation": 82, "stability": 25},
+            ),
+            settings=self.settings,
+        )
+
+        self.assertFalse(decision.should_follow_up)
+        self.assertEqual(decision.reason, "emotion_consistent_or_low_risk")
 
     def test_score_two_positive_voice_triggers_confirmation_followup(self):
         decision = assess_emotion_followup(
@@ -143,8 +184,8 @@ class EmotionFollowupTest(unittest.TestCase):
             emotion_record(
                 transcript="I'm fine.",
                 comparison={"audio_vs_context_consistent": True},
-                audio_scores={"tension": 50, "hesitation": 85, "stability": 35},
-                risk=50,
+                audio_scores={"tension": 50, "hesitation": 90, "stability": 25},
+                risk=70,
             )
         )
 
@@ -160,8 +201,8 @@ class EmotionFollowupTest(unittest.TestCase):
             emotion_record(
                 transcript="I'm fine.",
                 comparison={"audio_vs_context_consistent": True},
-                audio_scores={"tension": 50, "hesitation": 85, "stability": 35},
-                risk=50,
+                audio_scores={"tension": 50, "hesitation": 90, "stability": 25},
+                risk=70,
             )
         )
         queue_late_emotion_followup_request(

@@ -168,6 +168,7 @@ class VoiceMusicTests(unittest.TestCase):
 
     def test_mpv_background_music_cycles_modes_without_session_side_effects(self):
         popen_args = []
+        commands = []
 
         def popen_factory(*args, **kwargs):
             process = _FakeProcess()
@@ -194,20 +195,23 @@ class VoiceMusicTests(unittest.TestCase):
                     MusicMode("off", ""),
                 ],
                 popen_factory=popen_factory,
-                ipc_sender=lambda _ipc_path, _command: None,
+                ipc_sender=lambda _ipc_path, command: commands.append(command),
             )
             music._force_stop_matching_mpv_processes = lambda: None
 
             music.start()
             self.assertEqual(popen_args[-1][-1], str(music_path))
             self.assertEqual(music.cycle_mode(), "fireplace")
-            self.assertEqual(popen_args[-1][-1], str(fireplace_path))
+            self.assertEqual(len(popen_args), 1)
+            self.assertIn(["loadfile", str(fireplace_path), "replace"], commands)
             self.assertEqual(music.cycle_mode(), "seawaves")
-            self.assertEqual(popen_args[-1][-1], str(seawaves_path))
+            self.assertEqual(len(popen_args), 1)
+            self.assertIn(["loadfile", str(seawaves_path), "replace"], commands)
             self.assertEqual(music.cycle_mode(), "off")
             self.assertFalse(music.is_playing())
             self.assertEqual(music.cycle_mode(), "music")
             self.assertTrue(music.is_playing())
+            self.assertEqual(len(popen_args), 2)
             self.assertEqual(popen_args[-1][-1], str(music_path))
             music.stop()
 

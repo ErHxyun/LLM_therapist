@@ -359,9 +359,9 @@ emotion:
   assist_followup_enabled: true
   assist_wait_timeout_sec: 3.0
   assist_late_followup_window_sec: 10.0
-  assist_min_confidence: 45
-  assist_risk_threshold: 55
-  assist_light_risk_threshold: 40
+  assist_min_confidence: 50
+  assist_risk_threshold: 60
+  assist_light_risk_threshold: 45
 ```
 
 The `faster_whisper` backend loads Whisper once and reuses it across turns. It
@@ -423,7 +423,7 @@ The external service must be able to read the local `audio_file_path` sent in
 the request. Emotion outputs never enter LLM prompts, `record.csv`, CBT
 scoring, or final reports. When `assist_followup_enabled` is on, the main
 session waits up to `assist_wait_timeout_sec` for a reliable emotion result. If
-it arrives in time, a mismatch or strained vocal cue can add one gentle
+it arrives in time, a mismatch or strong strained vocal cue can add one gentle
 follow-up during the current question flow, but it never changes the text-based
 `0/1/2` score. If the result arrives after that wait but within
 `assist_late_followup_window_sec`, the follow-up is queued and prepended before
