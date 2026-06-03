@@ -29,7 +29,9 @@ from src.utils.config_loader import (  # noqa: E402
     INTERMISSION_TTS_COMMAND,
     VOICE_MUSIC_BACKEND,
     VOICE_MUSIC_COMMAND,
+    VOICE_MUSIC_FIREPLACE_PATH,
     VOICE_MUSIC_PATH,
+    VOICE_MUSIC_SEAWAVES_PATH,
     VOICE_STT_AUDIO_DEVICE,
     VOICE_STT_BACKEND,
     VOICE_STT_COMMAND,
@@ -261,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"TTS command: {VOICE_TTS_COMMAND}")
     print(f"Music backend: {VOICE_MUSIC_BACKEND}")
     print(f"Music path: {VOICE_MUSIC_PATH}")
+    print(f"Music fireplace path: {VOICE_MUSIC_FIREPLACE_PATH}")
+    print(f"Music seawaves path: {VOICE_MUSIC_SEAWAVES_PATH}")
     print(f"Intermission enabled: {INTERMISSION_ENABLED}")
     print(f"Intermission TTS backend: {INTERMISSION_TTS_BACKEND}")
 

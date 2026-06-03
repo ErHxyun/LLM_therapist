@@ -2,6 +2,7 @@ import threading
 import time
 
 from src.handler_rl import HandlerRL
+from src.hardware.music_mode_button import build_music_mode_button_controller
 from src.hardware.session_button import build_session_button_controller
 from src.hardware.status_leds import build_status_led_controller
 from src.hardware.volume_buttons import build_volume_button_controller
@@ -310,11 +311,19 @@ def main():
             music.stop()
             threading.Thread(target=speak_shutdown_once, name="caiti-shutdown-message", daemon=True).start()
 
+    def handle_music_mode_press() -> None:
+        cycle_mode = getattr(music, "cycle_mode", None)
+        if not callable(cycle_mode):
+            logger.info("Music mode button ignored: current music backend has no mode switch.")
+            return
+        cycle_mode()
+
     session_button = build_session_button_controller(
         handle_short_press,
         handle_long_press,
     )
     volume_buttons = build_volume_button_controller()
+    music_mode_button = build_music_mode_button_controller(handle_music_mode_press)
     voice_idle = threading.Event()
     voice_idle.set()
 
@@ -338,6 +347,7 @@ def main():
         status_leds.start()
         volume_buttons.start()
         status_monitor.set_phase("waiting_start")
+        music_mode_button.start()
         session_button_started = session_button.start()
         if not session_button_started and session_control.settings.enabled:
             logger.warning("Button unavailable; starting CaiTI without button gating.")
@@ -366,6 +376,7 @@ def main():
         finally:
             music.stop()
             session_button.stop()
+            music_mode_button.stop()
             volume_buttons.stop()
             status_leds.stop()
             status_monitor.stop()

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from src.voice.music import (
     CommandMusic,
     MPVBackgroundMusic,
+    MusicMode,
     NullMusic,
     build_mpv_command_args,
     build_music_command_args,
@@ -164,6 +165,84 @@ class VoiceMusicTests(unittest.TestCase):
         self.assertIn(["set_property", "pause", False], commands)
         self.assertIn(["quit"], commands)
         self.assertTrue(processes[0].terminated)
+
+    def test_mpv_background_music_cycles_modes_without_session_side_effects(self):
+        popen_args = []
+
+        def popen_factory(*args, **kwargs):
+            process = _FakeProcess()
+            process.pid = 12345
+            popen_args.append(args[0])
+            return process
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            music_path = Path(tmpdir) / "music.wav"
+            fireplace_path = Path(tmpdir) / "fireplace.wav"
+            seawaves_path = Path(tmpdir) / "seawaves.wav"
+            for path in (music_path, fireplace_path, seawaves_path):
+                path.write_bytes(b"RIFF" + b"0" * 80)
+
+            music = MPVBackgroundMusic(
+                path=str(music_path),
+                ipc_path="/tmp/test-caiti-mpv-modes.sock",
+                volume_percent=35,
+                duck_volume_percent=7,
+                modes=[
+                    MusicMode("music", str(music_path)),
+                    MusicMode("fireplace", str(fireplace_path)),
+                    MusicMode("seawaves", str(seawaves_path)),
+                    MusicMode("off", ""),
+                ],
+                popen_factory=popen_factory,
+                ipc_sender=lambda _ipc_path, _command: None,
+            )
+            music._force_stop_matching_mpv_processes = lambda: None
+
+            music.start()
+            self.assertEqual(popen_args[-1][-1], str(music_path))
+            self.assertEqual(music.cycle_mode(), "fireplace")
+            self.assertEqual(popen_args[-1][-1], str(fireplace_path))
+            self.assertEqual(music.cycle_mode(), "seawaves")
+            self.assertEqual(popen_args[-1][-1], str(seawaves_path))
+            self.assertEqual(music.cycle_mode(), "off")
+            self.assertFalse(music.is_playing())
+            self.assertEqual(music.cycle_mode(), "music")
+            self.assertTrue(music.is_playing())
+            self.assertEqual(popen_args[-1][-1], str(music_path))
+            music.stop()
+
+    def test_restore_volume_clears_ducked_state_when_music_is_off(self):
+        popen_args = []
+
+        def popen_factory(*args, **kwargs):
+            process = _FakeProcess()
+            process.pid = 12345
+            popen_args.append(args[0])
+            return process
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            music_path = Path(tmpdir) / "music.wav"
+            music_path.write_bytes(b"RIFF" + b"0" * 80)
+
+            music = MPVBackgroundMusic(
+                path=str(music_path),
+                ipc_path="/tmp/test-caiti-mpv-off.sock",
+                volume_percent=35,
+                duck_volume_percent=7,
+                modes=[MusicMode("music", str(music_path)), MusicMode("off", "")],
+                popen_factory=popen_factory,
+                ipc_sender=lambda _ipc_path, _command: None,
+            )
+            music._force_stop_matching_mpv_processes = lambda: None
+
+            music.start()
+            music.duck()
+            self.assertEqual(music.cycle_mode(), "off")
+            music.restore_volume()
+            self.assertEqual(music.cycle_mode(), "music")
+            music.start()
+
+        self.assertIn("--volume=35", popen_args[-1])
 
     def test_mpv_orphan_scan_matches_only_this_music_ipc_socket(self):
         output = "\n".join(

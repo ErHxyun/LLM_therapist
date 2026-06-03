@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 from urllib import error, request
 
+from src.emotion.followup import register_emotion_result
 from src.utils import config_loader
 from src.utils.log_util import get_logger
 
@@ -155,6 +156,7 @@ class EmotionSideChannel:
                     pass
 
         self._append_result(record)
+        register_emotion_result(record)
         return record
 
     def _utterance_id(self) -> str:

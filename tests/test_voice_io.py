@@ -8,6 +8,7 @@ import pandas as pd
 from src.voice.backends import CommandSTT, CommandTTS, FasterWhisperSTT
 import src.voice.io_loop as voice_io
 from src.voice.sentence_stream import split_for_tts
+from src.emotion import NullEmotionSideChannel
 from src.utils.io_record import HEADER
 
 
@@ -112,6 +113,7 @@ class VoiceIOTests(unittest.TestCase):
             )
 
             stt = FasterWhisperSTT(model="base.en", audio_device="plughw:0,0")
+            stt._emotion_side_channel = NullEmotionSideChannel()
             self.assertEqual(stt.listen(), "I see my doctor.")
             self.assertEqual(stt.listen(), "I see my doctor.")
             self.assertEqual(stt.last_timing["transcript_length"], 16)
@@ -152,6 +154,7 @@ class VoiceIOTests(unittest.TestCase):
             )
 
             stt = FasterWhisperSTT(model="base.en", audio_device="plughw:0,0")
+            stt._emotion_side_channel = NullEmotionSideChannel()
             self.assertEqual(stt.listen_with_waiting_music(FakeMusic()), "I feel okay.")
         finally:
             backends.whisper_stt.record_wav_auto_stop = original_record
@@ -159,6 +162,40 @@ class VoiceIOTests(unittest.TestCase):
             backends.whisper_stt.transcribe_wav_with_model = original_transcribe
 
         self.assertEqual(events, ["record", "music.start", "load", "transcribe"])
+
+    def test_faster_whisper_skips_emotion_for_empty_transcript(self):
+        events = []
+
+        class FakeEmotion:
+            def analyze_async(self, **kwargs):
+                events.append(kwargs)
+
+        stt = FasterWhisperSTT(sample_rate=16000)
+        stt._emotion_side_channel = FakeEmotion()
+        stt.last_audio_duration_sec = 1.5
+        stt._send_emotion_analysis("/tmp/missing.wav", "")
+
+        self.assertEqual(events, [])
+        self.assertIn("emotion_dispatch_duration_sec", stt.last_timing)
+
+    def test_faster_whisper_dispatches_emotion_for_non_empty_transcript(self):
+        events = []
+
+        class FakeEmotion:
+            def analyze_async(self, **kwargs):
+                events.append(kwargs)
+
+        stt = FasterWhisperSTT(sample_rate=16000)
+        stt._emotion_side_channel = FakeEmotion()
+        stt.last_audio_duration_sec = 2.25
+        stt._send_emotion_analysis("/tmp/input.wav", "I feel tired.")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["audio_file_path"], "/tmp/input.wav")
+        self.assertEqual(events[0]["transcript"], "I feel tired.")
+        self.assertEqual(events[0]["sample_rate"], 16000)
+        self.assertEqual(events[0]["duration_seconds"], 2.25)
+        self.assertIn("emotion_dispatch_duration_sec", stt.last_timing)
 
     def test_process_voice_turn_bridges_question_to_transcript(self):
         class FakeSTT:

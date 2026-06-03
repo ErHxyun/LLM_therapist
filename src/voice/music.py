@@ -22,8 +22,10 @@ from src.utils.config_loader import (
     VOICE_MUSIC_BACKEND,
     VOICE_MUSIC_COMMAND,
     VOICE_MUSIC_DUCK_VOLUME_PERCENT,
+    VOICE_MUSIC_FIREPLACE_PATH,
     VOICE_MUSIC_IPC_PATH,
     VOICE_MUSIC_PATH,
+    VOICE_MUSIC_SEAWAVES_PATH,
     VOICE_MUSIC_VOLUME_PERCENT,
 )
 from src.utils.log_util import get_logger
@@ -56,6 +58,37 @@ class MusicBackend(Protocol):
     def resume(self) -> None:
         """Resume music after pause."""
 
+    def cycle_mode(self) -> str:
+        """Switch to the next configured music mode."""
+
+
+@dataclass(frozen=True)
+class MusicMode:
+    name: str
+    path: str = ""
+
+
+def build_music_modes(
+    music_path: str,
+    fireplace_path: str = "",
+    seawaves_path: str = "",
+) -> list[MusicMode]:
+    return [
+        MusicMode("music", music_path),
+        MusicMode("fireplace", fireplace_path),
+        MusicMode("seawaves", seawaves_path),
+        MusicMode("off", ""),
+    ]
+
+
+def _normalize_music_modes(path: str, modes: list[MusicMode] | None) -> list[MusicMode]:
+    if modes:
+        normalized = list(modes)
+    else:
+        normalized = [MusicMode("music", path), MusicMode("off", "")]
+    if not normalized:
+        normalized = [MusicMode("off", "")]
+    return normalized
 
 @dataclass
 class NullMusic:
@@ -83,6 +116,9 @@ class NullMusic:
     def resume(self) -> None:
         return
 
+    def cycle_mode(self) -> str:
+        return "off"
+
 
 def format_music_command(command: str, path: str) -> str:
     quoted_path = shlex.quote(path)
@@ -103,12 +139,18 @@ class CommandMusic:
     path: str
     command: str = "aplay -q {path}"
     loop: bool = True
+    modes: list[MusicMode] | None = None
     popen_factory: Callable[..., subprocess.Popen] = subprocess.Popen
     poll_interval_sec: float = 0.1
     _stop_event: threading.Event | None = field(default=None, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
     _process: subprocess.Popen | None = field(default=None, init=False)
+    _mode_index: int = field(default=0, init=False)
+
+    def __post_init__(self) -> None:
+        self.modes = _normalize_music_modes(self.path, self.modes)
+        self.path = self.modes[self._mode_index].path
 
     def start(self) -> None:
         if not self.path:
@@ -172,6 +214,20 @@ class CommandMusic:
 
     def resume(self) -> None:
         self.start()
+
+    def cycle_mode(self) -> str:
+        was_playing = self.is_playing()
+        was_off = not self.path
+        if was_playing:
+            self.stop()
+        with self._lock:
+            self._mode_index = (self._mode_index + 1) % len(self.modes)
+            mode = self.modes[self._mode_index]
+            self.path = mode.path
+        logger.info("Waiting music mode changed: %s", mode.name)
+        if mode.path and (was_playing or was_off):
+            self.start()
+        return mode.name
 
     def _run(self, stop_event: threading.Event) -> None:
         command_args = build_music_command_args(self.command, self.path)
@@ -259,6 +315,7 @@ class MPVBackgroundMusic:
     ipc_path: str = "/tmp/caiti_mpv_music.sock"
     volume_percent: int = 30
     duck_volume_percent: int = 8
+    modes: list[MusicMode] | None = None
     popen_factory: Callable[..., subprocess.Popen] = subprocess.Popen
     ipc_sender: Callable[[str, list], None] | None = None
     ipc_ready_timeout_sec: float = 1.5
@@ -266,6 +323,11 @@ class MPVBackgroundMusic:
     _process: subprocess.Popen | None = field(default=None, init=False)
     _paused: bool = field(default=False, init=False)
     _ducked: bool = field(default=False, init=False)
+    _mode_index: int = field(default=0, init=False)
+
+    def __post_init__(self) -> None:
+        self.modes = _normalize_music_modes(self.path, self.modes)
+        self.path = self.modes[self._mode_index].path
 
     def start(self) -> None:
         if not self.path:
@@ -283,7 +345,8 @@ class MPVBackgroundMusic:
                 logger.warning("mpv is not installed; background music is disabled.")
                 return
             self._remove_stale_socket()
-            command_args = build_mpv_command_args(self.path, self.ipc_path, self.volume_percent)
+            initial_volume = self.duck_volume_percent if self._ducked else self.volume_percent
+            command_args = build_mpv_command_args(self.path, self.ipc_path, initial_volume)
             try:
                 self._process = self.popen_factory(
                     command_args,
@@ -297,7 +360,6 @@ class MPVBackgroundMusic:
                 self._process = None
                 return
             self._paused = False
-            self._ducked = False
         self._wait_for_ipc_ready()
         logger.info("Background music started with mpv: %s", self.path)
 
@@ -335,9 +397,9 @@ class MPVBackgroundMusic:
 
     def restore_volume(self) -> None:
         with self._lock:
+            self._ducked = False
             if self._process is None or self._process.poll() is not None:
                 return
-            self._ducked = False
             self._send_volume_locked(self.volume_percent)
 
     def pause(self) -> None:
@@ -362,6 +424,29 @@ class MPVBackgroundMusic:
             self._send_command_locked(["set_property", "pause", False])
             self._send_volume_locked(self.duck_volume_percent if self._ducked else self.volume_percent)
             self._paused = False
+
+    def cycle_mode(self) -> str:
+        with self._lock:
+            process = self._process
+            was_running = bool(process is not None and process.poll() is None)
+            was_paused = self._paused
+            was_ducked = self._ducked
+            was_off = not self.path
+            self._mode_index = (self._mode_index + 1) % len(self.modes)
+            mode = self.modes[self._mode_index]
+            self.path = mode.path
+
+        if was_running:
+            self.stop()
+            with self._lock:
+                self._ducked = was_ducked
+
+        logger.info("Background music mode changed: %s", mode.name)
+        if mode.path and (was_running or was_off):
+            self.start()
+            if was_paused:
+                self.pause()
+        return mode.name
 
     def _send_volume_locked(self, volume_percent: int) -> None:
         self._send_command_locked(["set_property", "volume", int(volume_percent)])
@@ -493,12 +578,25 @@ def build_music() -> MusicBackend:
     if backend in {"", "off", "none", "disabled"}:
         return NullMusic()
     if backend == "command":
-        return CommandMusic(VOICE_MUSIC_PATH, VOICE_MUSIC_COMMAND)
+        return CommandMusic(
+            VOICE_MUSIC_PATH,
+            VOICE_MUSIC_COMMAND,
+            modes=build_music_modes(
+                VOICE_MUSIC_PATH,
+                fireplace_path=VOICE_MUSIC_FIREPLACE_PATH,
+                seawaves_path=VOICE_MUSIC_SEAWAVES_PATH,
+            ),
+        )
     if backend == "mpv":
         return MPVBackgroundMusic(
             VOICE_MUSIC_PATH,
             ipc_path=VOICE_MUSIC_IPC_PATH,
             volume_percent=VOICE_MUSIC_VOLUME_PERCENT,
             duck_volume_percent=VOICE_MUSIC_DUCK_VOLUME_PERCENT,
+            modes=build_music_modes(
+                VOICE_MUSIC_PATH,
+                fireplace_path=VOICE_MUSIC_FIREPLACE_PATH,
+                seawaves_path=VOICE_MUSIC_SEAWAVES_PATH,
+            ),
         )
     raise ValueError(f"Unsupported music backend: {VOICE_MUSIC_BACKEND}")

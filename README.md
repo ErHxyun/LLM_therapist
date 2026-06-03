@@ -167,6 +167,8 @@ Optional background music can be stored at:
 
 ```text
 assets/audio/music.wav
+assets/audio/fireplace.wav
+assets/audio/seawaves.wav
 ```
 
 Audio files under `assets/audio/` are ignored by git, except `.gitkeep`, because they are local runtime assets. The background music backend uses `mpv` IPC so music can keep playing while CaiTI lowers it during TTS and STT.
@@ -317,9 +319,11 @@ voice:
   stt_silence_timeout_sec: 1.2
   stt_trailing_pad_sec: 0.4
   stt_no_speech_timeout_sec: 5.0
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.4"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.25"
   music_backend: "mpv"
   music_path: "assets/audio/music.wav"
+  music_fireplace_path: "assets/audio/fireplace.wav"
+  music_seawaves_path: "assets/audio/seawaves.wav"
   music_command: "aplay -q {path}"
   music_volume_percent: 80
   music_duck_volume_percent: 40
@@ -328,7 +332,7 @@ voice:
 intermission:
   enabled: true
   tts_backend: "persistent_piper"
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-lessac-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6"
   fallback_to_primary_tts: true
   screening_enabled: true
   breathing_enabled: true
@@ -344,14 +348,20 @@ intermission:
   results_json_path: "data/phq_gad_results.json"
 
 emotion:
-  enabled: false
+  enabled: true
   service_url: "http://127.0.0.1:8000/analyze"
   user_id: "${subject_id}"
   language: "en"
-  timeout_sec: 10
+  timeout_sec: 60
   results_jsonl_path: "data/emotion/results.jsonl"
   audio_dir: "data/emotion/audio"
   keep_audio: false
+  assist_followup_enabled: true
+  assist_wait_timeout_sec: 3.0
+  assist_late_followup_window_sec: 10.0
+  assist_min_confidence: 45
+  assist_risk_threshold: 55
+  assist_light_risk_threshold: 40
 ```
 
 The `faster_whisper` backend loads Whisper once and reuses it across turns. It
@@ -378,7 +388,7 @@ Voice role selection is centralized in `src/voice/tts/router.py`: the main and
 CBT roles use the primary TTS, while intermission prefers its configured voice
 and falls back to the primary TTS when allowed.
 
-Background music is optional. With `music_backend: "mpv"`, music loops through the whole session, lowers during CaiTI TTS and user STT, pauses on the button pause, and resumes from the same playback process when the session continues. Install `mpv` on the Jetson before using this backend:
+Background music is optional. With `music_backend: "mpv"`, music loops through the whole session, lowers during CaiTI TTS and user STT, pauses on the button pause, and resumes from the same playback process when the session continues. The optional music-mode button cycles `music.wav` -> `fireplace.wav` -> `seawaves.wav` -> off without changing the main session or intermission state. Install `mpv` on the Jetson before using this backend:
 
 ```bash
 sudo apt install mpv
@@ -405,13 +415,21 @@ intermission voice is configured separately;
 until the male Piper model is present, `fallback_to_primary_tts: true` keeps
 the app audible with CaiTI's primary voice.
 
-The emotion module is an optional side-channel for the external
-`xxue752-nz/emo_module` FastAPI service. When `emotion.enabled: true`, each
-successful STT turn is copied to `data/emotion/audio`, sent asynchronously with
+The emotion module is a side-channel for the external
+`xxue752-nz/emo_module` FastAPI service. With `emotion.enabled: true`, each
+non-empty STT turn is copied to `data/emotion/audio`, sent asynchronously with
 the transcript to `/analyze`, and appended to `data/emotion/results.jsonl`.
 The external service must be able to read the local `audio_file_path` sent in
-the request. Emotion outputs never enter LLM prompts, `record.csv`, RL/CBT
-scoring, or final reports.
+the request. Emotion outputs never enter LLM prompts, `record.csv`, CBT
+scoring, or final reports. When `assist_followup_enabled` is on, the main
+session waits up to `assist_wait_timeout_sec` for a reliable emotion result. If
+it arrives in time, a mismatch or strained vocal cue can add one gentle
+follow-up during the current question flow, but it never changes the text-based
+`0/1/2` score. If the result arrives after that wait but within
+`assist_late_followup_window_sec`, the follow-up is queued and prepended before
+the next screening question. If the service is down, too slow, low-confidence,
+or reports poor audio quality, the main session continues without
+emotion-assisted follow-up and the side-channel records the row.
 
 To temporarily fall back to console input/output:
 

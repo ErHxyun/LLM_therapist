@@ -1,7 +1,16 @@
+import json
+import time
 from typing import List, Tuple, Dict, Any
 
 import numpy as np
 
+from src.emotion import (
+    assess_emotion_followup,
+    build_emotion_followup_settings,
+    pop_late_emotion_followup,
+    queue_late_emotion_followup_request,
+    wait_for_emotion_result,
+)
 from src.utils.response_bridge import get_openai_resp, is_explicit_stop_request
 from src.utils.text_generators import (
     generate_change,
@@ -16,7 +25,7 @@ from src.utils.session_records import build_question_attempt_record
 
 # Set up logger for this module
 from src.utils.log_util import get_logger
-from src.utils.io_record import get_answer, get_resp_log, log_question, set_question_prefix
+from src.utils.io_record import append_question_prefix, get_answer, get_resp_log, log_question, set_question_prefix
 logger = get_logger("Questioner")
 
 from src.reflection_validation import parse_rv_decision, rv_reasoner, rv_guide, rv_validation
@@ -131,6 +140,128 @@ def _log_reflective_followup(
         metadata={"mode": "simple_reflection"},
     )
 
+
+def _maybe_build_emotion_followup(
+    *,
+    dimension: str,
+    score: int,
+    segment_text: str,
+    question_text: str,
+):
+    try:
+        settings = build_emotion_followup_settings()
+        if not settings.enabled:
+            return None
+        started_at = time.monotonic()
+        record = wait_for_emotion_result(segment_text, settings.wait_timeout_sec)
+        if record is None:
+            queue_late_emotion_followup_request(
+                dimension=dimension,
+                score=int(score),
+                user_text=segment_text,
+                question_text=question_text,
+                settings=settings,
+                started_at=started_at,
+            )
+            return None
+        decision = assess_emotion_followup(
+            score=int(score),
+            user_text=segment_text,
+            record=record,
+            settings=settings,
+        )
+        if decision.should_follow_up:
+            metadata = dict(decision.metadata)
+            metadata.update(
+                {
+                    "mode": "emotion_followup",
+                    "reason": decision.reason,
+                    "followup_text": decision.followup_text,
+                }
+            )
+            log_llm_event(
+                task="emotion_assist_followup",
+                dimension=dimension,
+                score=score,
+                segment_text=segment_text,
+                question_text=question_text,
+                raw_llm_output=json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                normalized_output=decision.reason,
+                metadata=metadata,
+            )
+        return decision
+    except Exception as exc:
+        logger.warning("Emotion follow-up check failed: %s", exc)
+        return None
+
+
+def _apply_late_emotion_followup_prefix() -> None:
+    try:
+        decision = pop_late_emotion_followup()
+        if not decision or not decision.should_follow_up:
+            return
+        metadata = dict(getattr(decision, "metadata", {}) or {})
+        metadata.update(
+            {
+                "mode": "late_emotion_followup",
+                "reason": decision.reason,
+                "followup_text": decision.followup_text,
+            }
+        )
+        log_llm_event(
+            task="emotion_late_followup",
+            dimension=str(metadata.get("dimension", "")),
+            score=int(metadata.get("score", 0)),
+            segment_text=str(metadata.get("user_text", "")),
+            question_text=str(metadata.get("question_text", "")),
+            raw_llm_output=json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            normalized_output=decision.reason,
+            metadata=metadata,
+        )
+        append_question_prefix(decision.followup_text)
+        logger.info("Queued late emotion follow-up before next question: %s", decision.reason)
+    except Exception as exc:
+        logger.warning("Late emotion follow-up check failed: %s", exc)
+
+
+def _emotion_note_lines(decision) -> List[str]:
+    if not decision or not getattr(decision, "should_follow_up", False):
+        return []
+    metadata = getattr(decision, "metadata", {}) or {}
+    return [
+        "emotion_followup_reason: " + str(getattr(decision, "reason", "")),
+        "emotion_confidence: " + str(metadata.get("confidence", "")),
+        "emotion_credibility_risk: " + str(metadata.get("credibility_risk", "")),
+    ]
+
+
+def _build_followup_for_score(
+    *,
+    dimension: str,
+    score: int,
+    answer_text: str,
+    original_question: str,
+):
+    emotion_decision = _maybe_build_emotion_followup(
+        dimension=dimension,
+        score=score,
+        segment_text=answer_text,
+        question_text=original_question,
+    )
+    if emotion_decision and emotion_decision.should_follow_up:
+        return emotion_decision.followup_text, emotion_decision
+    if score > 1:
+        followup_text = _build_reflective_followup(answer_text, original_question)
+        _log_reflective_followup(
+            dimension=dimension,
+            score=score,
+            segment_text=answer_text,
+            question_text=original_question,
+            followup_text=followup_text,
+        )
+        return followup_text, emotion_decision
+    return "", emotion_decision
+
 def classify_segments(user_segments: List[str], original_question: str, dimension_label: str) -> List[Tuple[str, int]]:
     """
     Classifies each user segment using the OpenAI response bridge.
@@ -191,23 +322,21 @@ def _if_valid_response(
             question_lib[str(item_index)][str(question_index)]["score"].append(score)
             logger.info("Appended score %s for keyword %s to question_lib[%s][%s].", str(score), str(score_norm), str(item_index), str(question_index))
 
-            if score > 1:
-                answer_text = user_segments[i] if i < len(user_segments) else str(score_norm)
-                followup_to_RV = _build_reflective_followup(answer_text, original_question)
-                _log_reflective_followup(
-                    dimension=question_label,
-                    score=score,
-                    segment_text=answer_text,
-                    question_text=original_question,
-                    followup_text=followup_to_RV,
-                )
+            answer_text = user_segments[i] if i < len(user_segments) else str(score_norm)
+            followup_to_RV, emotion_decision = _build_followup_for_score(
+                dimension=question_label,
+                score=score,
+                answer_text=answer_text,
+                original_question=original_question,
+            )
 
             # Prepare note for follow-up, to be appended by caller after collecting follow-up
-            original_resp = "original_resp: " + (user_segments[i] if i < len(user_segments) else user_segments[0])
+            original_resp = "original_resp: " + answer_text
             note_resp = [
                 "original_question: " + original_question,
                 original_resp,
             ]
+            note_resp.extend(_emotion_note_lines(emotion_decision))
             question_lib[str(item_index)][str(question_index)]["notes"].append(note_resp)
             logger.debug("Appended note to question_lib[%s][%s]['notes'].", str(item_index), str(question_index))
             return 1, 0, followup_to_RV, question_lib
@@ -216,22 +345,20 @@ def _if_valid_response(
         if label_norm.lower() == str(question_label).lower() and score_norm in [0, 1, 2]:
             logger.info("Valid response: label matches and score is in [0,1,2]")
             question_lib[str(item_index)][str(question_index)]["score"].append(score_norm)
-            if score_norm > 1:
-                answer_text = user_segments[i] if i < len(user_segments) else ""
-                followup_to_RV = _build_reflective_followup(answer_text, original_question)
-                _log_reflective_followup(
-                    dimension=question_label,
-                    score=score_norm,
-                    segment_text=answer_text,
-                    question_text=original_question,
-                    followup_text=followup_to_RV,
-                )
+            answer_text = user_segments[i] if i < len(user_segments) else ""
+            followup_to_RV, emotion_decision = _build_followup_for_score(
+                dimension=question_label,
+                score=score_norm,
+                answer_text=answer_text,
+                original_question=original_question,
+            )
             # Prepare note
-            original_resp = "original_resp: " + (user_segments[i] if i < len(user_segments) else user_segments[0])
+            original_resp = "original_resp: " + answer_text
             note_resp = [
                 "original_question: " + original_question,
                 original_resp,
             ]
+            note_resp.extend(_emotion_note_lines(emotion_decision))
             question_lib[str(item_index)][str(question_index)]["notes"].append(note_resp)
             logger.debug("Appended note to question_lib[%s][%s]['notes'].", str(item_index), str(question_index))
             return 1, 0, followup_to_RV, question_lib
@@ -356,6 +483,7 @@ def ask_question(
         # Check if the score list for this item is empty (i.e., not answered yet)
         if len(question_lib[str(S)][str(question_A)]["score"]) == 0:
             # if the item is not answered yet, ask it directly
+            _apply_late_emotion_followup_prefix()
             
             # Get the number of available question variants for this item
             number_of_questions = len(question_lib[str(S)][str(question_A)]["question"])

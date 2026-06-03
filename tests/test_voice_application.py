@@ -393,6 +393,13 @@ class VoiceApplicationTests(unittest.TestCase):
             def stop(self):
                 events.append("volume.stop")
 
+        class FakeMusicModeButton:
+            def start(self):
+                events.append("music_mode.start")
+
+            def stop(self):
+                events.append("music_mode.stop")
+
         class FakeSessionButton:
             def start(self):
                 events.append("session_button.start")
@@ -492,6 +499,7 @@ class VoiceApplicationTests(unittest.TestCase):
             "build_status_led_controller": app.build_status_led_controller,
             "build_status_monitor": app.build_status_monitor,
             "build_volume_button_controller": app.build_volume_button_controller,
+            "build_music_mode_button_controller": app.build_music_mode_button_controller,
             "HandlerRL": app.HandlerRL,
             "threading.Thread": app.threading.Thread,
             "threading.Event": app.threading.Event,
@@ -513,6 +521,7 @@ class VoiceApplicationTests(unittest.TestCase):
             app.build_session_button_controller = lambda _short, _long: FakeSessionButton()
             app.build_status_led_controller = lambda **_kwargs: FakeStatusLEDs()
             app.build_volume_button_controller = lambda: FakeVolumeButtons()
+            app.build_music_mode_button_controller = lambda _press: FakeMusicModeButton()
             app.HandlerRL = FakeHandler
             app._preload_llm_runtime = lambda: events.append("preload_llm_runtime")
             app._warm_up_tts = lambda _tts: events.append("warm_up_tts")
@@ -535,6 +544,7 @@ class VoiceApplicationTests(unittest.TestCase):
             app.build_status_led_controller = originals["build_status_led_controller"]
             app.build_status_monitor = originals["build_status_monitor"]
             app.build_volume_button_controller = originals["build_volume_button_controller"]
+            app.build_music_mode_button_controller = originals["build_music_mode_button_controller"]
             app.HandlerRL = originals["HandlerRL"]
             app.threading.Thread = originals["threading.Thread"]
             app.threading.Event = originals["threading.Event"]
@@ -557,6 +567,7 @@ class VoiceApplicationTests(unittest.TestCase):
                 "led.start",
                 "volume.start",
                 "monitor.phase:waiting_start",
+                "music_mode.start",
                 "session_button.start",
                 "session.wait_start",
                 "music.start",
@@ -573,6 +584,7 @@ class VoiceApplicationTests(unittest.TestCase):
                 "drain",
                 "music.stop",
                 "session_button.stop",
+                "music_mode.stop",
                 "volume.stop",
                 "led.stop",
                 "monitor.stop",
@@ -596,6 +608,13 @@ class VoiceApplicationTests(unittest.TestCase):
 
             def stop(self):
                 events.append("volume.stop")
+
+        class FakeMusicModeButton:
+            def start(self):
+                events.append("music_mode.start")
+
+            def stop(self):
+                events.append("music_mode.stop")
 
         class FakeSessionButton:
             def start(self):
@@ -698,6 +717,7 @@ class VoiceApplicationTests(unittest.TestCase):
             "build_status_led_controller": app.build_status_led_controller,
             "build_status_monitor": app.build_status_monitor,
             "build_volume_button_controller": app.build_volume_button_controller,
+            "build_music_mode_button_controller": app.build_music_mode_button_controller,
             "HandlerRL": app.HandlerRL,
             "threading.Thread": app.threading.Thread,
             "threading.Event": app.threading.Event,
@@ -720,6 +740,7 @@ class VoiceApplicationTests(unittest.TestCase):
             app.build_session_button_controller = lambda _short, _long: FakeSessionButton()
             app.build_status_led_controller = lambda **_kwargs: FakeStatusLEDs()
             app.build_volume_button_controller = lambda: FakeVolumeButtons()
+            app.build_music_mode_button_controller = lambda _press: FakeMusicModeButton()
             app.HandlerRL = FakeHandler
             app._preload_llm_runtime = lambda: events.append("preload_llm_runtime")
             app._warm_up_tts = lambda _tts: events.append("warm_up_tts")
@@ -743,6 +764,7 @@ class VoiceApplicationTests(unittest.TestCase):
             app.build_status_led_controller = originals["build_status_led_controller"]
             app.build_status_monitor = originals["build_status_monitor"]
             app.build_volume_button_controller = originals["build_volume_button_controller"]
+            app.build_music_mode_button_controller = originals["build_music_mode_button_controller"]
             app.HandlerRL = originals["HandlerRL"]
             app.threading.Thread = originals["threading.Thread"]
             app.threading.Event = originals["threading.Event"]

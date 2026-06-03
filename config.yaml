@@ -74,14 +74,16 @@ voice:
   stt_min_speech_seconds: 0.25
   stt_min_record_seconds: 1.0
   stt_no_speech_timeout_sec: 5.0
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.4"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.25"
   stt_timeout_sec: 120
   tts_timeout_sec: 60
   empty_transcript_retries: 2
   # Background music: mpv keeps music alive and lowers volume during TTS/STT.
   # Use "command" to fall back to the older aplay waiting-music backend.
   music_backend: "mpv" # off | command | mpv
-  music_path: "assets/audio/music.wav"
+  music_path: "assets/audio/music1.wav"
+  music_fireplace_path: "assets/audio/music2.wav"
+  music_seawaves_path: "assets/audio/music3.wav"
   music_command: "aplay -q {path}"
   music_volume_percent: 80
   music_duck_volume_percent: 40
@@ -93,7 +95,7 @@ intermission:
   # does not call the LLM, and does not update RL/CBT scores or user reports.
   enabled: true
   tts_backend: "persistent_piper" # command | persistent_piper | primary
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-lessac-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6"
   fallback_to_primary_tts: true
   screening_enabled: true
   breathing_enabled: true
@@ -119,14 +121,21 @@ intermission:
 emotion:
   # Optional side-channel to xxue752-nz/emo_module.
   # This never enters LLM prompts and never changes RL/CBT scoring.
-  enabled: false
+  enabled: true
   service_url: "http://127.0.0.1:8000/analyze"
   user_id: "${subject_id}"
   language: "en"
-  timeout_sec: 10
+  timeout_sec: 60
   results_jsonl_path: "data/emotion/results.jsonl"
   audio_dir: "data/emotion/audio"
   keep_audio: false
+  # Emotion may add a gentle follow-up, but it never changes 0/1/2 scoring.
+  assist_followup_enabled: true
+  assist_wait_timeout_sec: 3.0
+  assist_late_followup_window_sec: 10.0
+  assist_min_confidence: 45
+  assist_risk_threshold: 55
+  assist_light_risk_threshold: 40
 
 hardware:
   # Optional Jetson 40-pin header controls.
@@ -149,6 +158,15 @@ hardware:
   volume_release_sec: 0.2
   volume_poll_interval_sec: 0.01
   volume_active_low: true
+
+  # Button wiring: 3.3V -- 10k resistor -- BOARD pin -- button -- GND.
+  # Cycles background audio: music -> fireplace white noise -> seawaves -> off.
+  music_mode_button_enabled: true
+  music_mode_button_board_pin: 35
+  music_mode_button_debounce_sec: 0.5
+  music_mode_button_release_sec: 0.2
+  music_mode_button_poll_interval_sec: 0.01
+  music_mode_button_active_low: true
 
   # Button wiring: 3.3V -- 10k resistor -- BOARD pin -- button -- GND.
   # Short press starts/resumes/pauses at safe workflow boundaries.

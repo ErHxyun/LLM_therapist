@@ -27,6 +27,21 @@ def set_question_prefix(text: str):
     global _PENDING_QUESTION_PREFIX
     _PENDING_QUESTION_PREFIX = str(text) if text is not None else ""
 
+
+def append_question_prefix(text: str):
+    """
+    Append text to the pending prefix that will be prepended to the next question output.
+    """
+    global _PENDING_QUESTION_PREFIX
+    text = str(text) if text is not None else ""
+    if not text:
+        return
+    if _PENDING_QUESTION_PREFIX:
+        _PENDING_QUESTION_PREFIX = f"{_PENDING_QUESTION_PREFIX}\n\n{text}"
+    else:
+        _PENDING_QUESTION_PREFIX = text
+
+
 def _read():
     last_exc = None
     for _ in range(5):

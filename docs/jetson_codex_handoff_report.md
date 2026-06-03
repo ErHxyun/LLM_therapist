@@ -233,7 +233,7 @@ voice:
   stt_backend: "command" # console | command
   tts_backend: "command" # console | command
   stt_command: "python scripts/faster_whisper_stt_command.py --model base.en --record-seconds 8 --audio-device plughw:0,0 --stt-device cpu --compute-type int8 --beam-size 5 --best-of 5 --vad-filter"
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.4"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.25"
   stt_timeout_sec: 120
   tts_timeout_sec: 60
   empty_transcript_retries: 2
@@ -259,7 +259,7 @@ python -m pip install --user 'faster-whisper>=1.0.0,<2.0.0' piper-tts soundfile
 export CAITI_STT_BACKEND=command
 export CAITI_STT_COMMAND="python scripts/faster_whisper_stt_command.py --model base.en --stt-device cpu --compute-type int8 --record-seconds 8 --audio-device plughw:0,0 --beam-size 5 --best-of 5 --vad-filter"
 export CAITI_TTS_BACKEND=command
-export CAITI_TTS_COMMAND="python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.4"
+export CAITI_TTS_COMMAND="python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.25"
 export CAITI_MUSIC_BACKEND=command
 export CAITI_MUSIC_PATH=assets/audio/music.wav
 ```

@@ -135,6 +135,8 @@ Optional background music lives under `assets/audio/`:
 
 ```text
 assets/audio/music.wav
+assets/audio/fireplace.wav
+assets/audio/seawaves.wav
 ```
 
 Audio files in this directory are ignored by git because they are local runtime
@@ -209,12 +211,14 @@ voice:
   stt_min_speech_seconds: 0.25
   stt_min_record_seconds: 1.0
   stt_no_speech_timeout_sec: 5.0
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.4"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.25"
   stt_timeout_sec: 120
   tts_timeout_sec: 60
   empty_transcript_retries: 2
   music_backend: "mpv"
   music_path: "assets/audio/music.wav"
+  music_fireplace_path: "assets/audio/fireplace.wav"
+  music_seawaves_path: "assets/audio/seawaves.wav"
   music_command: "aplay -q {path}"
   music_volume_percent: 80
   music_duck_volume_percent: 40
@@ -223,7 +227,7 @@ voice:
 intermission:
   enabled: true
   tts_backend: "command"
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-hfc_male-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.4"
+  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-lessac-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.4"
   fallback_to_primary_tts: true
   screening_enabled: true
   breathing_enabled: true
@@ -256,7 +260,9 @@ STT auto-stop behavior:
 
 With `music_backend: "mpv"`, background music starts during model loading,
 keeps looping through the session, lowers volume during CaiTI TTS and user STT,
-and resumes after the button pause. Install `mpv` first:
+and resumes after the button pause. The optional music-mode button cycles
+`music.wav` -> `fireplace.wav` -> `seawaves.wav` -> off without changing main
+session or intermission state. Install `mpv` first:
 
 ```bash
 sudo apt install mpv

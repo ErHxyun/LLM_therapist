@@ -180,6 +180,10 @@ class FasterWhisperSTT:
     def _send_emotion_analysis(self, wav_file: str, transcript: str) -> None:
         started_at = time.monotonic()
         try:
+            if not str(transcript or "").strip():
+                self.last_timing["emotion_dispatch_duration_sec"] = round(time.monotonic() - started_at, 3)
+                logger.info("Skipping emotion analysis because transcript is empty.")
+                return
             self._get_emotion_side_channel().analyze_async(
                 audio_file_path=wav_file,
                 transcript=transcript,

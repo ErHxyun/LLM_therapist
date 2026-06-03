@@ -175,6 +175,15 @@ VOICE_EMPTY_TRANSCRIPT_RETRIES = int(
 )
 VOICE_MUSIC_BACKEND = os.environ.get("CAITI_MUSIC_BACKEND", str(VOICE.get("music_backend", "off")))
 VOICE_MUSIC_PATH = os.environ.get("CAITI_MUSIC_PATH", str(VOICE.get("music_path", "")))
+VOICE_MUSIC_FIREPLACE_PATH = os.environ.get(
+    "CAITI_MUSIC_FIREPLACE_PATH",
+    str(VOICE.get("music_fireplace_path", "")),
+)
+VOICE_MUSIC_SEAWAVES_PATH = os.environ.get(
+    "CAITI_MUSIC_SEAWAVES_PATH",
+    str(VOICE.get("music_seawaves_path", VOICE.get("music_forest_path", ""))),
+)
+VOICE_MUSIC_FOREST_PATH = VOICE_MUSIC_SEAWAVES_PATH
 VOICE_MUSIC_COMMAND = os.environ.get("CAITI_MUSIC_COMMAND", str(VOICE.get("music_command", "aplay -q {path}")))
 VOICE_MUSIC_VOLUME_PERCENT = int(
     os.environ.get("CAITI_MUSIC_VOLUME_PERCENT", str(VOICE.get("music_volume_percent", 30)))
@@ -309,6 +318,40 @@ EMOTION_AUDIO_DIR = _expand(
     )
 )
 EMOTION_KEEP_AUDIO = _bool_env("CAITI_EMOTION_KEEP_AUDIO", EMOTION.get("keep_audio", False))
+EMOTION_ASSIST_FOLLOWUP_ENABLED = _bool_env(
+    "CAITI_EMOTION_ASSIST_FOLLOWUP_ENABLED",
+    EMOTION.get("assist_followup_enabled", False),
+)
+EMOTION_ASSIST_WAIT_TIMEOUT_SEC = float(
+    os.environ.get(
+        "CAITI_EMOTION_ASSIST_WAIT_TIMEOUT_SEC",
+        str(EMOTION.get("assist_wait_timeout_sec", 0.0)),
+    )
+)
+EMOTION_ASSIST_LATE_FOLLOWUP_WINDOW_SEC = float(
+    os.environ.get(
+        "CAITI_EMOTION_ASSIST_LATE_FOLLOWUP_WINDOW_SEC",
+        str(EMOTION.get("assist_late_followup_window_sec", 0.0)),
+    )
+)
+EMOTION_ASSIST_MIN_CONFIDENCE = int(
+    os.environ.get(
+        "CAITI_EMOTION_ASSIST_MIN_CONFIDENCE",
+        str(EMOTION.get("assist_min_confidence", 50)),
+    )
+)
+EMOTION_ASSIST_RISK_THRESHOLD = int(
+    os.environ.get(
+        "CAITI_EMOTION_ASSIST_RISK_THRESHOLD",
+        str(EMOTION.get("assist_risk_threshold", 60)),
+    )
+)
+EMOTION_ASSIST_LIGHT_RISK_THRESHOLD = int(
+    os.environ.get(
+        "CAITI_EMOTION_ASSIST_LIGHT_RISK_THRESHOLD",
+        str(EMOTION.get("assist_light_risk_threshold", 45)),
+    )
+)
 
 HARDWARE_STATUS_LEDS_ENABLED = _bool_env(
     "CAITI_STATUS_LEDS_ENABLED",
@@ -369,6 +412,30 @@ HARDWARE_VOLUME_POLL_INTERVAL_SEC = float(
 HARDWARE_VOLUME_ACTIVE_LOW = _bool_env(
     "CAITI_VOLUME_ACTIVE_LOW",
     HARDWARE.get("volume_active_low", True),
+)
+
+HARDWARE_MUSIC_MODE_BUTTON_ENABLED = _bool_env(
+    "CAITI_MUSIC_MODE_BUTTON_ENABLED",
+    HARDWARE.get("music_mode_button_enabled", False),
+)
+HARDWARE_MUSIC_MODE_BUTTON_BOARD_PIN = int(
+    os.environ.get("CAITI_MUSIC_MODE_BUTTON_BOARD_PIN", str(HARDWARE.get("music_mode_button_board_pin", 35)))
+)
+HARDWARE_MUSIC_MODE_BUTTON_DEBOUNCE_SEC = float(
+    os.environ.get("CAITI_MUSIC_MODE_BUTTON_DEBOUNCE_SEC", str(HARDWARE.get("music_mode_button_debounce_sec", 0.5)))
+)
+HARDWARE_MUSIC_MODE_BUTTON_RELEASE_SEC = float(
+    os.environ.get("CAITI_MUSIC_MODE_BUTTON_RELEASE_SEC", str(HARDWARE.get("music_mode_button_release_sec", 0.2)))
+)
+HARDWARE_MUSIC_MODE_BUTTON_POLL_INTERVAL_SEC = float(
+    os.environ.get(
+        "CAITI_MUSIC_MODE_BUTTON_POLL_INTERVAL_SEC",
+        str(HARDWARE.get("music_mode_button_poll_interval_sec", 0.01)),
+    )
+)
+HARDWARE_MUSIC_MODE_BUTTON_ACTIVE_LOW = _bool_env(
+    "CAITI_MUSIC_MODE_BUTTON_ACTIVE_LOW",
+    HARDWARE.get("music_mode_button_active_low", True),
 )
 
 HARDWARE_SESSION_BUTTON_ENABLED = _bool_env(
