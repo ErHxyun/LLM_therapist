@@ -1,4 +1,6 @@
 import unittest
+import re
+from pathlib import Path
 
 from src.utils import config_loader
 from src.utils.io_question_lib import load_question_lib
@@ -46,6 +48,30 @@ EXPECTED_DIMENSION_LABELS = [
 ]
 
 
+def _documented_question_variants():
+    doc_path = Path("docs/question_variants.md")
+    sections = {}
+    current = None
+    for raw in doc_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        heading = re.match(r"^(\d+)\.\s+(.+?)\s+\(`([^`]+)`\)\s*$", line)
+        if heading:
+            current = {
+                "index": int(heading.group(1)),
+                "title": heading.group(2),
+                "label": heading.group(3),
+                "questions": [],
+            }
+            sections[str(current["index"])] = current
+            continue
+        question = re.match(r"^(\d+)\.\s*(.+)$", line)
+        if question and current:
+            current["questions"].append(question.group(2).strip())
+    return sections
+
+
 class PaperConsistencyTest(unittest.TestCase):
     def test_rl_config_matches_paper_state_and_hyperparameter_contract(self):
         self.assertEqual(config_loader.ITEM_N_STATES, 39)
@@ -64,6 +90,18 @@ class PaperConsistencyTest(unittest.TestCase):
         labels = [question_lib[str(i)]["1"]["label"] for i in range(1, len(question_lib) + 1)]
         self.assertEqual(len(labels), 37)
         self.assertEqual(labels, EXPECTED_DIMENSION_LABELS)
+
+    def test_question_library_matches_documented_variants_exactly(self):
+        question_lib = load_question_lib(config_loader.QUESTION_LIB_FILENAME)
+        documented = _documented_question_variants()
+        self.assertEqual(len(documented), 37)
+        for i in range(1, len(question_lib) + 1):
+            key = str(i)
+            self.assertIn(key, documented)
+            self.assertEqual(question_lib[key]["1"]["label"], documented[key]["label"])
+            questions = question_lib[key]["1"]["question"]
+            self.assertGreaterEqual(len(questions), 1, f"dimension {i} should have at least one variant")
+            self.assertEqual(questions, documented[key]["questions"])
 
     def test_q_table_uses_start_dimension_and_end_state_columns(self):
         actions = [str(i) for i in range(config_loader.ITEM_N_STATES)]
