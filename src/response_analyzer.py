@@ -33,8 +33,8 @@ Input format:
 
 All dimension names are:{
     weight, mood, medication, care, house, talk, emo, safe, risk, sleep, eat, work, work_dayoff,
-    showup, finance, nutrition, problem, support, family, drug, ciga, alcohol, hobbies, creativity, community, 
-    support, social, comfortable, protection, productivity, work_motivation, coping, sib, arrest,legal, hygiene, sports, 
+    showup, finance, nutrition, problem, family_support, family, drug, ciga, alcohol, hobbies, creativity, community,
+    social_support, social, comfortable, protection, productivity, work_motivation, coping, sib, arrest, legal, hygiene, sports,
     Yes, No, Maybe, Question, Stop
 }
 
@@ -56,7 +56,7 @@ The definition of each dimension are:
     finance: Managing finance and items of value 
     nutrition: Getting adequate nutrition
     problem: Problem solving and decision making capability
-    support: Family support
+    family_support: Family support
     family: Family relationship
     alcohol: Alcohol abuse
     ciga: Tobacco abuse
@@ -64,7 +64,7 @@ The definition of each dimension are:
     hobbies: Enjoying personal choices for leisure activities
     creativity: Creativity
     community: Participation in community
-    support: Support from social network
+    social_support: Support from social network
     social: Relationship with friends and colleagues
     comfortable: Managing boundaries in close relationship
     protection: Managing sexual safety

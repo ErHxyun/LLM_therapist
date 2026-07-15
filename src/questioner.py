@@ -1,5 +1,6 @@
 import json
 import time
+from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Any
 
 import numpy as np
@@ -66,6 +67,37 @@ RV_MAX_GUIDE_RETRIES = 2
 _PENDING_NEXT_QUESTION_INTRO = ""
 _PENDING_VALIDATION_TEXT = ""
 
+
+@dataclass(frozen=True)
+class SegmentAssessment:
+    segment_index: int
+    text: str
+    dimension: str
+    item_id: int
+    score: int | None
+    response_type: str
+    valid: bool
+
+
+@dataclass
+class EvaluationOutcome:
+    assessments: List[SegmentAssessment] = field(default_factory=list)
+    covered_item_ids: set[int] = field(default_factory=set)
+    current_answered: bool = False
+    score2_queue: List[SegmentAssessment] = field(default_factory=list)
+    terminate: bool = False
+    unresolved_segments: List[str] = field(default_factory=list)
+    current_followup: str = ""
+
+@dataclass
+class QuestionTurnOutcome:
+    reward: float
+    terminate: int
+    previous_question: str
+    covered_item_ids: set[int] = field(default_factory=set)
+    current_answered: bool = False
+
+
 def _chat_complete(system_content: str, user_content: str):
     """
     Unified LLM entry that delegates to llm_complete.
@@ -118,11 +150,14 @@ def _strip_spoken_label(text: str) -> str:
 
 
 def _compose_question_with_intro(question_text: str) -> str:
+    validation = _strip_spoken_label(_pop_pending_validation_text())
     intro = _pop_pending_next_question_intro()
-    question_text = str(question_text or "").strip()
-    if intro and question_text:
-        return f"{intro} {question_text}"
-    return intro or question_text
+    parts = [
+        text
+        for text in (validation, intro, str(question_text or "").strip())
+        if text
+    ]
+    return " ".join(parts)
 
 
 def _publish_question_context(
@@ -309,10 +344,10 @@ def _maybe_build_emotion_followup(
 
 def _run_late_emotion_followup_before_question(session_control=None) -> bool:
     try:
-        validation_text = _strip_spoken_label(_pop_pending_validation_text())
         decision = pop_late_emotion_followup()
         if not decision or not decision.should_follow_up:
             return False
+        validation_text = _strip_spoken_label(_pop_pending_validation_text())
         metadata = dict(getattr(decision, "metadata", {}) or {})
         metadata.update(
             {
@@ -404,6 +439,120 @@ def classify_segments(user_segments: List[str], original_question: str, dimensio
     logger.info("Classification complete. Results: %s", str(result))
     return result
 
+
+
+def _resolve_dimension_target(
+    question_lib: Dict[str, Any],
+    label: str,
+    current_item_index: int,
+    current_question_index: str,
+) -> Tuple[str, str] | None:
+    """Resolve a Task 1 dimension to one fixed question-library item."""
+    label_norm = str(label or "").strip().lower()
+    current_item = str(current_item_index)
+    current_question = str(current_question_index)
+    current_entry = question_lib[current_item][current_question]
+    if str(current_entry.get("label", "")).strip().lower() == label_norm:
+        return current_item, current_question
+
+    matches: List[Tuple[str, str]] = []
+    for candidate_item, item_questions in question_lib.items():
+        if not isinstance(item_questions, dict):
+            continue
+        for candidate_question, entry in item_questions.items():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("label", "")).strip().lower() == label_norm:
+                matches.append((str(candidate_item), str(candidate_question)))
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        logger.warning(
+            "Skipping cross-dimension score for ambiguous label %s; matches=%s.",
+            label,
+            matches,
+        )
+    else:
+        logger.info("Skipping score for label %s because it is not in the question library.", label)
+    return None
+
+
+def _record_scored_segment(
+    *,
+    question_lib: Dict[str, Any],
+    target_item: str,
+    target_question: str,
+    dimension: str,
+    score: int,
+    answer_text: str,
+    original_question: str,
+    classification_label: str,
+    classification_value: Any,
+    is_current_dimension: bool,
+    allow_followup: bool = True,
+    emotion_decision_override=None,
+) -> str:
+    """Persist one classified segment and return a current-dimension follow-up, if any."""
+    entry = question_lib[target_item][target_question]
+    entry.setdefault("score", []).append(int(score))
+
+    followup_text = ""
+    emotion_decision = emotion_decision_override
+    if is_current_dimension and allow_followup:
+        followup_text, emotion_decision = _build_followup_for_score(
+            dimension=dimension,
+            score=int(score),
+            answer_text=answer_text,
+            original_question=original_question,
+        )
+
+    note_resp = [
+        "original_question: " + original_question,
+        "original_resp: " + answer_text,
+        "classified_dimension: " + dimension,
+        "cross_dimension: " + str(not is_current_dimension).lower(),
+    ]
+    note_resp.extend(_emotion_note_lines(emotion_decision))
+    entry.setdefault("notes", []).append(note_resp)
+    _publish_score_update(
+        item_id=target_item,
+        question_index=target_question,
+        dimension=dimension,
+        score=int(score),
+        user_input=answer_text,
+        classification=[[str(classification_label), classification_value]],
+        followup_text=followup_text,
+    )
+    logger.info(
+        "Recorded score %s for dimension %s at question_lib[%s][%s] (cross_dimension=%s).",
+        score,
+        dimension,
+        target_item,
+        target_question,
+        not is_current_dimension,
+    )
+    return followup_text
+
+
+def _current_dimension_response_text(
+    dla_result: List[Tuple[str, Any]],
+    user_segments: List[str],
+    question_label: str,
+) -> str:
+    for index, (label, score_val) in enumerate(dla_result):
+        is_general_answer = str(score_val) in {"Yes", "No"}
+        is_current_score = (
+            str(label).strip().lower() == str(question_label).strip().lower()
+            and score_val in [0, 1, 2]
+        )
+        if is_general_answer or is_current_score:
+            return user_segments[index] if index < len(user_segments) else ""
+    return user_segments[0] if user_segments else ""
+
+
+
+
 def _if_valid_response(
     dla_result: List[Tuple[str, Any]],
     item_index: int,
@@ -411,108 +560,316 @@ def _if_valid_response(
     user_segments: List[str],
     original_question: str,
     question_lib: Dict[str, Any],
-    ) -> Tuple[int, int, str, Dict[str, Any]]:
-    """
-    Unified logic: iterate over all labels in dla_result, 
-    return as soon as an identifiable valid or command-like label is found.
-    """
-    # Default to no follow-up; only set when we truly have a follow-up to ask
-    followup_to_RV = ""
+) -> EvaluationOutcome:
+    """Assess every segment, persist valid scores, and return one structured outcome."""
+    outcome = EvaluationOutcome()
+    current_item = str(item_index)
+    current_item_id = int(item_index)
+    current_question = str(question_index)
+    question_entry = question_lib[current_item][current_question]
+    question_label = str(question_entry["label"])
+    queued_score2_by_item: Dict[int, SegmentAssessment] = {}
+
     if not dla_result:
-        logger.info("No DLA result provided. Returning default values.")
-        return 0, 0, followup_to_RV, question_lib
+        logger.info("No DLA result provided. Returning an empty evaluation outcome.")
+        return outcome
 
-    question_label = question_lib[str(item_index)][str(question_index)]["label"]
-
-    for i, (label, score_val) in enumerate(dla_result):
-        # Normalize label for robust match
+    for index, (label, score_val) in enumerate(dla_result):
         label_norm = str(label).strip()
         score_norm = score_val
-        logger.info(f"Processing dla_result entry: {label_norm}, {score_norm}")
+        answer_text = user_segments[index] if index < len(user_segments) else ""
+        logger.info("Processing dla_result entry: %s, %s", label_norm, score_norm)
 
-        # Yes/No/Stop bound to the question's dimension (unified format)
-        if str(score_norm) in ["Yes", "No", "Stop"]:
-            logger.info(f"Match special token: {score_norm}")
-            if str(score_norm) == "Stop":
-                answer_text = user_segments[i] if i < len(user_segments) else ""
-                if not is_explicit_stop_request(answer_text):
-                    logger.info("Ignoring Stop token because user text is not an explicit stop request.")
-                    continue
-                logger.info("Received 'Stop' label. Terminating evaluation.")
-                return 1, 1, followup_to_RV, question_lib
-
-            score = question_lib[str(item_index)][str(question_index)].get(str(score_norm), 99)
-            question_lib[str(item_index)][str(question_index)]["score"].append(score)
-            logger.info("Appended score %s for keyword %s to question_lib[%s][%s].", str(score), str(score_norm), str(item_index), str(question_index))
-
-            answer_text = user_segments[i] if i < len(user_segments) else str(score_norm)
-            followup_to_RV, emotion_decision = _build_followup_for_score(
+        if str(score_norm) == "Stop":
+            is_explicit = is_explicit_stop_request(answer_text)
+            assessment = SegmentAssessment(
+                segment_index=index,
+                text=answer_text,
                 dimension=question_label,
-                score=score,
-                answer_text=answer_text,
-                original_question=original_question,
+                item_id=current_item_id,
+                score=None,
+                response_type="stop",
+                valid=is_explicit,
             )
-
-            # Prepare note for follow-up, to be appended by caller after collecting follow-up
-            original_resp = "original_resp: " + answer_text
-            note_resp = [
-                "original_question: " + original_question,
-                original_resp,
-            ]
-            note_resp.extend(_emotion_note_lines(emotion_decision))
-            question_lib[str(item_index)][str(question_index)]["notes"].append(note_resp)
-            _publish_score_update(
-                item_id=item_index,
-                question_index=question_index,
-                dimension=question_label,
-                score=score,
-                user_input=answer_text,
-                classification=[[str(label_norm), score_norm]],
-                followup_text=followup_to_RV,
-            )
-            logger.debug("Appended note to question_lib[%s][%s]['notes'].", str(item_index), str(question_index))
-            return 1, 0, followup_to_RV, question_lib
-
-        # Valid response: Label matches question label & score in [0,1,2]
-        if label_norm.lower() == str(question_label).lower() and score_norm in [0, 1, 2]:
-            logger.info("Valid response: label matches and score is in [0,1,2]")
-            question_lib[str(item_index)][str(question_index)]["score"].append(score_norm)
-            answer_text = user_segments[i] if i < len(user_segments) else ""
-            followup_to_RV, emotion_decision = _build_followup_for_score(
-                dimension=question_label,
-                score=score_norm,
-                answer_text=answer_text,
-                original_question=original_question,
-            )
-            # Prepare note
-            original_resp = "original_resp: " + answer_text
-            note_resp = [
-                "original_question: " + original_question,
-                original_resp,
-            ]
-            note_resp.extend(_emotion_note_lines(emotion_decision))
-            question_lib[str(item_index)][str(question_index)]["notes"].append(note_resp)
-            _publish_score_update(
-                item_id=item_index,
-                question_index=question_index,
-                dimension=question_label,
-                score=int(score_norm),
-                user_input=answer_text,
-                classification=[[str(label_norm), score_norm]],
-                followup_text=followup_to_RV,
-            )
-            logger.debug("Appended note to question_lib[%s][%s]['notes'].", str(item_index), str(question_index))
-            return 1, 0, followup_to_RV, question_lib
-
-        # Skip Maybe or Question, follow-up will be collected by caller
-        if str(score_norm) in ["Maybe", "Question"]:
-            logger.info("Processing 'Maybe' or 'Question' token.")
-            # return 0, 0, followup_to_RV, question_lib
+            outcome.assessments.append(assessment)
+            if is_explicit:
+                outcome.terminate = True
+                logger.info("Recorded explicit Stop without returning before later assessments.")
+            else:
+                outcome.unresolved_segments.append(answer_text)
+                logger.info("Ignored non-explicit Stop classification.")
             continue
 
-    # If nothing matched, fallback: invalid response
-    logger.info("No valid, yes, no, or stop label found in results. Marking as invalid response.")
-    return 0, 0, followup_to_RV, question_lib
+        if str(score_norm) in {"Yes", "No"}:
+            mapped_score = question_entry.get(str(score_norm), 99)
+            is_valid = mapped_score in [0, 1, 2]
+            assessment = SegmentAssessment(
+                segment_index=index,
+                text=answer_text,
+                dimension=question_label,
+                item_id=current_item_id,
+                score=int(mapped_score) if is_valid else None,
+                response_type="general",
+                valid=is_valid,
+            )
+            outcome.assessments.append(assessment)
+            if not is_valid:
+                outcome.unresolved_segments.append(answer_text)
+                logger.warning("Unmapped general response %s for %s.", score_norm, question_label)
+                continue
+
+            if int(mapped_score) == 2:
+                if current_item_id not in queued_score2_by_item:
+                    queued_score2_by_item[current_item_id] = assessment
+                logger.info(
+                    "Queued provisional Score 2 for current dimension %s.",
+                    question_label,
+                )
+            else:
+                candidate_followup = _record_scored_segment(
+                    question_lib=question_lib,
+                    target_item=current_item,
+                    target_question=current_question,
+                    dimension=question_label,
+                    score=int(mapped_score),
+                    answer_text=answer_text or str(score_norm),
+                    original_question=original_question,
+                    classification_label=label_norm,
+                    classification_value=score_norm,
+                    is_current_dimension=True,
+                    allow_followup=not bool(outcome.current_followup),
+                )
+                if candidate_followup and not outcome.current_followup:
+                    outcome.current_followup = candidate_followup
+                outcome.covered_item_ids.add(current_item_id)
+            continue
+
+        if score_norm in [0, 1, 2]:
+            target = _resolve_dimension_target(
+                question_lib,
+                label_norm,
+                item_index,
+                question_index,
+            )
+            if target is None:
+                outcome.assessments.append(
+                    SegmentAssessment(
+                        segment_index=index,
+                        text=answer_text,
+                        dimension=label_norm,
+                        item_id=0,
+                        score=int(score_norm),
+                        response_type="score",
+                        valid=False,
+                    )
+                )
+                outcome.unresolved_segments.append(answer_text)
+                continue
+
+            target_item, target_question = target
+            target_item_id = int(target_item)
+            target_entry = question_lib[target_item][target_question]
+            target_dimension = str(target_entry["label"])
+            is_current_dimension = (
+                target_item == current_item and target_question == current_question
+            )
+            assessment = SegmentAssessment(
+                segment_index=index,
+                text=answer_text,
+                dimension=target_dimension,
+                item_id=target_item_id,
+                score=int(score_norm),
+                response_type="score",
+                valid=True,
+            )
+            outcome.assessments.append(assessment)
+            if int(score_norm) == 2:
+                if target_item_id not in queued_score2_by_item:
+                    queued_score2_by_item[target_item_id] = assessment
+                logger.info(
+                    "Queued provisional Score 2 for dimension %s at item %s.",
+                    target_dimension,
+                    target_item_id,
+                )
+            else:
+                candidate_followup = _record_scored_segment(
+                    question_lib=question_lib,
+                    target_item=target_item,
+                    target_question=target_question,
+                    dimension=target_dimension,
+                    score=int(score_norm),
+                    answer_text=answer_text,
+                    original_question=original_question,
+                    classification_label=label_norm,
+                    classification_value=score_norm,
+                    is_current_dimension=is_current_dimension,
+                    allow_followup=not bool(outcome.current_followup),
+                )
+                if is_current_dimension and candidate_followup and not outcome.current_followup:
+                    outcome.current_followup = candidate_followup
+                outcome.covered_item_ids.add(target_item_id)
+            continue
+
+        response_type = (
+            str(score_norm).lower()
+            if str(score_norm) in {"Maybe", "Question"}
+            else "unresolved"
+        )
+        outcome.assessments.append(
+            SegmentAssessment(
+                segment_index=index,
+                text=answer_text,
+                dimension=label_norm,
+                item_id=0,
+                score=None,
+                response_type=response_type,
+                valid=False,
+            )
+        )
+        outcome.unresolved_segments.append(answer_text)
+        logger.info("No score recorded for response value %s.", score_norm)
+
+    outcome.current_answered = current_item_id in outcome.covered_item_ids
+    queued = list(queued_score2_by_item.values())
+    outcome.score2_queue = (
+        [assessment for assessment in queued if assessment.item_id == current_item_id]
+        + [assessment for assessment in queued if assessment.item_id != current_item_id]
+    )
+    if outcome.terminate:
+        outcome.current_followup = ""
+    if not outcome.current_answered and not outcome.terminate:
+        logger.info(
+            "Current dimension %s remains unanswered; valid cross-dimension scores were retained.",
+            question_label,
+        )
+    return outcome
+
+
+def _run_score2_reflection_validation(
+    *,
+    assessment: SegmentAssessment,
+    followup_text: str,
+    original_question: str,
+    session_control=None,
+    validation_prefix: str = "",
+) -> Dict[str, Any]:
+    """Run one interactive R-V cycle without committing its provisional Score 2."""
+    spoken_validation = _strip_spoken_label(validation_prefix)
+    prompt = (
+        f"{spoken_validation} {followup_text}".strip()
+        if spoken_validation
+        else followup_text
+    )
+    logger.info(
+        "Running provisional Score 2 R-V for item %s (%s).",
+        assessment.item_id,
+        assessment.dimension,
+    )
+    log_question(prompt)
+    user_response = _get_resp_log_with_control(session_control)
+    followup_responses = [user_response]
+    interrupted = _checkpoint_requested_skip_to_cbt(session_control)
+    interruption_reason = "skip_to_cbt" if interrupted else ""
+    rv_stopped = _is_stop_request(user_response)
+
+    rv_decision_token = "1"
+    rv_decision_raws: List[str] = []
+    rv_guide_texts: List[str] = []
+    rv_retry_limit = max(0, int(RV_MAX_GUIDE_RETRIES))
+    rv_retry_count = 0
+
+    while not interrupted and not rv_stopped:
+        logger.info(
+            "Running ReflectionValidation reasoner for provisional dimension '%s'.",
+            assessment.dimension,
+        )
+        rv_decision_raw = rv_reasoner(
+            assessment.dimension,
+            original_question,
+            assessment.text,
+            user_response,
+        )
+        rv_decision_raws.append(str(rv_decision_raw))
+        rv_decision_token = parse_rv_decision(rv_decision_raw, default="1")
+        logger.info("ReflectionValidation decision: %s", rv_decision_token)
+
+        if rv_decision_token == "0":
+            break
+        if rv_retry_count >= rv_retry_limit:
+            logger.info(
+                "ReflectionValidation retries exhausted for provisional item %s after %s guide attempt(s).",
+                assessment.item_id,
+                rv_retry_count,
+            )
+            break
+
+        rv_guide_text = rv_guide(
+            assessment.dimension,
+            original_question,
+            assessment.text,
+            user_response,
+        )
+        rv_guide_texts.append(rv_guide_text)
+        log_question(rv_guide_text)
+        user_response = _get_resp_log_with_control(session_control)
+        followup_responses.append(user_response)
+        rv_retry_count += 1
+        if _checkpoint_requested_skip_to_cbt(session_control):
+            interrupted = True
+            interruption_reason = "skip_to_cbt"
+            break
+        rv_stopped = _is_stop_request(user_response)
+
+    completed = (
+        rv_decision_token == "0"
+        and not interrupted
+        and not rv_stopped
+    )
+    validation_text = ""
+    if completed:
+        logger.info(
+            "Running ReflectionValidation validator for provisional dimension '%s'.",
+            assessment.dimension,
+        )
+        validation_text = rv_validation(
+            assessment.dimension,
+            original_question,
+            assessment.text,
+            user_response,
+        )
+
+    retry_exhausted = (
+        rv_decision_token != "0"
+        and not interrupted
+        and not rv_stopped
+        and rv_retry_count >= rv_retry_limit
+    )
+    notes = [
+        "original_question: " + original_question,
+        "original_resp: " + assessment.text,
+        "followup_resp: " + (followup_responses[0] if followup_responses else ""),
+        "rv_decision: " + rv_decision_token,
+        "rv_decision_raw: " + " | ".join(rv_decision_raws),
+        "rv_guide: " + " | ".join(rv_guide_texts),
+        "rv_retry_count: " + str(rv_retry_count),
+        "rv_retry_exhausted: " + str(retry_exhausted).lower(),
+        "followup_resp_1: " + (
+            followup_responses[-1] if len(followup_responses) > 1 else ""
+        ),
+        "rv_validation: " + validation_text,
+        "rv_completed: " + str(completed).lower(),
+        "rv_interrupted: " + interruption_reason,
+        "therapist_resp: ",
+    ]
+    return {
+        "completed": completed,
+        "terminate": bool(interrupted or rv_stopped),
+        "followup_text": followup_text,
+        "validation_text": validation_text,
+        "notes": notes,
+    }
+
+
 
 def evaluate_result(question_lib, DLA_result, S, question_A, user_input, original_question_asked, session_control=None):
     """
@@ -522,10 +879,18 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
     """
     logger.info(f"Evaluating result for item {S}, question {question_A}.")
     # If valid user response, update the question library and last question
-    valid, terminate, followup_to_RV, updated = _if_valid_response(
+    outcome = _if_valid_response(
         [(lbl, sc) for lbl, sc in DLA_result], S, question_A, user_input, original_question_asked, question_lib
     )
-    question_lib = updated
+    valid = int(outcome.current_answered)
+    terminate = int(outcome.terminate)
+    followup_to_RV = outcome.current_followup
+    question_label = question_lib[str(S)][str(question_A)]["label"]
+    current_response_text = _current_dimension_response_text(
+        [(lbl, sc) for lbl, sc in DLA_result],
+        user_input,
+        question_label,
+    )
     # Update previous_question if a new one is provided
     previous_question = followup_to_RV 
     if followup_to_RV:
@@ -540,7 +905,7 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
 
         # ReflectionValidation three steps（topic = the dimension label of the current question）
         topic = question_lib[str(S)][str(question_A)]["label"]
-        original_resp = user_input[0] if user_input else ""
+        original_resp = current_response_text
 
         rv_decision_token = "1"
         rv_decision_raws = []
@@ -599,7 +964,7 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
         logger.info("Recording notes for this question/response.")
         note_resp = [
             "original_question: " + original_question_asked,
-            "original_resp: " + (user_input[0] if user_input else ""),
+            "original_resp: " + current_response_text,
             "followup_resp: " + (followup_responses[0] if followup_responses else ""),
             "rv_decision: " + rv_decision_token,
             "rv_decision_raw: " + " | ".join(rv_decision_raws),
@@ -618,6 +983,98 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
             logger.info("User requested stop during ReflectionValidation.")
             return valid, 1, previous_question, question_lib
         
+    if outcome.score2_queue and not terminate:
+        validation_prefix = _pop_pending_validation_text()
+        _pop_pending_next_question_intro()
+        last_rv_completed = False
+
+        for assessment in outcome.score2_queue:
+            followup_text, emotion_decision = _build_followup_for_score(
+                dimension=assessment.dimension,
+                score=2,
+                answer_text=assessment.text,
+                original_question=original_question_asked,
+            )
+            if not previous_question:
+                previous_question = followup_text
+
+            rv_run = _run_score2_reflection_validation(
+                assessment=assessment,
+                followup_text=followup_text,
+                original_question=original_question_asked,
+                session_control=session_control,
+                validation_prefix=validation_prefix,
+            )
+            target_item = str(assessment.item_id)
+            target_questions = question_lib[target_item]
+            target_question = next(
+                (
+                    str(candidate_question)
+                    for candidate_question, entry in target_questions.items()
+                    if isinstance(entry, dict)
+                    and str(entry.get("label", "")).strip().lower()
+                    == assessment.dimension.strip().lower()
+                ),
+                "1",
+            )
+            committed = bool(rv_run["completed"])
+            if committed:
+                _record_scored_segment(
+                    question_lib=question_lib,
+                    target_item=target_item,
+                    target_question=target_question,
+                    dimension=assessment.dimension,
+                    score=2,
+                    answer_text=assessment.text,
+                    original_question=original_question_asked,
+                    classification_label=assessment.dimension,
+                    classification_value=2,
+                    is_current_dimension=assessment.item_id == int(S),
+                    allow_followup=False,
+                    emotion_decision_override=emotion_decision,
+                )
+                outcome.covered_item_ids.add(assessment.item_id)
+                validation_prefix = str(rv_run["validation_text"])
+                last_rv_completed = True
+                logger.info(
+                    "Committed Score 2 after successful R-V for item %s (%s).",
+                    assessment.item_id,
+                    assessment.dimension,
+                )
+            else:
+                validation_prefix = ""
+                last_rv_completed = False
+                logger.info(
+                    "Left Score 2 provisional and uncommitted for item %s (%s).",
+                    assessment.item_id,
+                    assessment.dimension,
+                )
+
+            rv_note = list(rv_run["notes"])
+            rv_note.extend(
+                [
+                    "provisional_score: 2",
+                    "score_committed: " + str(committed).lower(),
+                ]
+            )
+            question_lib[target_item][target_question].setdefault("notes", []).append(
+                rv_note
+            )
+
+            if rv_run["terminate"]:
+                terminate = 1
+                break
+
+        if last_rv_completed and not terminate:
+            _set_pending_validation_text(validation_prefix)
+            _set_pending_next_question_intro(FOLLOWUP_CONTINUE_TEXT)
+            logger.info(
+                "Queued the final R-V validation before the next screening question."
+            )
+
+    outcome.current_answered = int(S) in outcome.covered_item_ids
+    valid = int(outcome.current_answered)
+
     return valid, terminate, previous_question, question_lib
 
 def ask_question(
@@ -625,16 +1082,46 @@ def ask_question(
     S: int,
     turn_records: List[Dict[str, Any]] = None,
     session_control=None,
-) -> Tuple[float, int, str]:
+) -> QuestionTurnOutcome:
         """
         Handles the RL loop for asking questions within a given item (S).
-        Returns the total reward, termination flag, and the last question asked.
+        Returns reward plus the dimensions actually covered by this question turn.
         """
         logger.info(f"Starting question RL loop for item S={S}.")
         question_reward = []
         DLA_terminate = 0
         
         previous_question = ""
+        starting_score_counts = {
+            int(item_id): len(item_questions.get("1", {}).get("score", []))
+            for item_id, item_questions in question_lib.items()
+            if str(item_id).isdigit() and isinstance(item_questions, dict)
+        }
+
+        def finish_question(
+            reward: float,
+            terminate: int,
+            last_question: str,
+        ) -> QuestionTurnOutcome:
+            covered_item_ids = {
+                int(item_id)
+                for item_id, item_questions in question_lib.items()
+                if str(item_id).isdigit()
+                and isinstance(item_questions, dict)
+                and len(item_questions.get("1", {}).get("score", []))
+                > starting_score_counts.get(int(item_id), 0)
+            }
+            current_answered = bool(
+                question_lib.get(str(S), {}).get("1", {}).get("score", [])
+            )
+            return QuestionTurnOutcome(
+                reward=float(reward),
+                terminate=int(terminate),
+                previous_question=last_question,
+                covered_item_ids=covered_item_ids,
+                current_answered=current_answered,
+            )
+
         
         # If there is only one question for this item, ask it directly
         question_A = "1"
@@ -643,7 +1130,7 @@ def ask_question(
             # if the item is not answered yet, ask it directly
             if _run_late_emotion_followup_before_question(session_control):
                 logger.info("Late emotion follow-up ended the screening flow before the next question.")
-                return 0.0, 1, previous_question
+                return finish_question(0.0, 1, previous_question)
             
             # Get the number of available question variants for this item
             number_of_questions = len(question_lib[str(S)][str(question_A)]["question"])
@@ -668,7 +1155,7 @@ def ask_question(
             _ , user_input = _get_answer_with_control(session_control)
             if _checkpoint_requested_skip_to_cbt(session_control):
                 logger.info("Screening question interrupted by skip-to-CBT request.")
-                return 0.0, 1, previous_question
+                return finish_question(0.0, 1, previous_question)
             # Classify the user response into DLA result segments
             dimension_label = question_lib[str(S)][str(question_A)]["label"]
             DLA_result = [[label, score] for (label, score) in classify_segments(user_input, question_text, dimension_label)]
@@ -702,6 +1189,7 @@ def ask_question(
                 topic = question_lib[str(S)][str(question_A)]["label"]
                 original_answer_text = " ".join(user_input) if user_input else ""
                 guide_text = retry_guide(topic, question_text, original_answer_text)
+                guide_text = _compose_question_with_intro(guide_text)
                 # Show the guide to the user and collect a new response
                 log_question(guide_text)
                 _publish_question_context(
@@ -715,7 +1203,7 @@ def ask_question(
                 _ , user_input = _get_answer_with_control(session_control)
                 if _checkpoint_requested_skip_to_cbt(session_control):
                     logger.info("Screening retry interrupted by skip-to-CBT request.")
-                    return 0.0, 1, previous_question
+                    return finish_question(0.0, 1, previous_question)
                 # Classify the new user response
                 dimension_label = question_lib[str(S)][str(question_A)]["label"]
                 DLA_result = [[label, score] for (label, score) in classify_segments(user_input, question_text, dimension_label)]
@@ -751,4 +1239,10 @@ def ask_question(
 
         # Return the total reward, termination flag, and last question
         logger.info(f"Finished question RL loop for item S={S}. Total reward: {float(sum(question_reward))}, DLA_terminate: {int(DLA_terminate)}")
-        return float(sum(question_reward)), int(DLA_terminate), previous_question
+        result = finish_question(
+            float(sum(question_reward)),
+            int(DLA_terminate),
+            previous_question,
+        )
+        logger.info("Question turn covered item ids: %s; current_answered=%s", sorted(result.covered_item_ids), result.current_answered)
+        return result

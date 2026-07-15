@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 
 from src.utils import config_loader
-from src.utils.io_question_lib import load_question_lib
+from src.utils.io_question_lib import load_question_lib, migrate_question_lib_labels
 from src.utils.rl_qtables import initialize_q_table, choose_action
 
 
@@ -25,7 +25,7 @@ EXPECTED_DIMENSION_LABELS = [
     "finance",
     "nutrition",
     "problem",
-    "support",
+    "family_support",
     "family",
     "alcohol",
     "ciga",
@@ -33,7 +33,7 @@ EXPECTED_DIMENSION_LABELS = [
     "hobbies",
     "creativity",
     "community",
-    "support",
+    "social_support",
     "social",
     "comfortable",
     "protection",
@@ -90,6 +90,33 @@ class PaperConsistencyTest(unittest.TestCase):
         labels = [question_lib[str(i)]["1"]["label"] for i in range(1, len(question_lib) + 1)]
         self.assertEqual(len(labels), 37)
         self.assertEqual(labels, EXPECTED_DIMENSION_LABELS)
+        self.assertEqual(len(set(labels)), 37)
+
+    def test_legacy_support_labels_migrate_without_losing_saved_data(self):
+        legacy = {
+            "18": {
+                "1": {
+                    "label": "support",
+                    "score": [2],
+                    "notes": [["original_resp: Family is not available."]],
+                }
+            },
+            "26": {
+                "1": {
+                    "label": "support",
+                    "score": [0],
+                    "notes": [["original_resp: My friends support me."]],
+                }
+            },
+        }
+
+        migrated = migrate_question_lib_labels(legacy)
+
+        self.assertIs(migrated, legacy)
+        self.assertEqual(migrated["18"]["1"]["label"], "family_support")
+        self.assertEqual(migrated["26"]["1"]["label"], "social_support")
+        self.assertEqual(migrated["18"]["1"]["score"], [2])
+        self.assertEqual(migrated["26"]["1"]["notes"], [["original_resp: My friends support me."]])
 
     def test_question_library_matches_documented_variants_exactly(self):
         question_lib = load_question_lib(config_loader.QUESTION_LIB_FILENAME)

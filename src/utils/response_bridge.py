@@ -169,23 +169,32 @@ def _normalize_dim_score(dim: str, score: int):
         logger.warning(f"Invalid dimension-score contract: dim={dim}, score={score}")
     return normalized
 
-def _parse_dim_score_from_text(text: str):
+def _parse_dim_score_from_text(text: str, validate_dimension: bool = True):
     """
     Parse '[dim][sep][score]' from a free-form text line.
     Supports formats like 'talk, 1', '3_talk, 1', 'DLA_3_talk, 1', etc.
     Accept separators: comma, colon, hyphen, or whitespace.
     """
     logger.debug(f"Parsing dimension-score from text: {text}")
-    return _contract_parse_dim_score_from_text(text)
+    return _contract_parse_dim_score_from_text(text, validate_dimension=validate_dimension)
 
-def _parse_from_json_like(raw: str):
+def _parse_from_json_like(raw: str, validate_dimension: bool = True):
     """
     If the model returns JSON-like content, try to extract:
     - {'res': '3_talk, 1'}
     - {'dimension': '3_talk', 'score': 1}
     """
     logger.debug(f"Trying to parse as JSON-like: {raw}")
-    return _contract_parse_from_json_like(raw)
+    return _contract_parse_from_json_like(raw, validate_dimension=validate_dimension)
+
+
+def _parse_legacy_support_output(raw: str) -> tuple[str, int] | None:
+    parsed = _parse_dim_score_from_text(raw, validate_dimension=False)
+    if not parsed:
+        parsed = _parse_from_json_like(raw, validate_dimension=False)
+    if parsed and parsed[0] == "support":
+        return parsed
+    return None
 
 
 def _task1_fallback(
@@ -220,24 +229,6 @@ def _task1_dimension_result(
     source: str,
     dimension_label: str,
 ):
-    if str(dim).strip().lower() != str(dimension_label).strip().lower():
-        logger.info(
-            "Task1 dimension guard rejected %s,%s for current dimension %s.",
-            dim,
-            score,
-            dimension_label,
-        )
-        return _task1_fallback(
-            user_input=user_input,
-            original_question=original_question,
-            raw=raw,
-            source="dimension_guard",
-            dimension_label=dimension_label,
-            rejected_dimension=dim,
-            rejected_score=score,
-            rejected_source=source,
-        )
-
     log_llm_event(
         task=LLMTask.TASK1_RESPONSE_ANALYZER,
         dimension=dim,
@@ -246,7 +237,11 @@ def _task1_dimension_result(
         question_text=original_question,
         raw_llm_output=raw,
         normalized_output=f"{dim}, {score}",
-        metadata={"source": source, "current_dimension": dimension_label},
+        metadata={
+            "source": source,
+            "current_dimension": dimension_label,
+            "cross_dimension": str(dim).strip().lower() != str(dimension_label).strip().lower(),
+        },
     )
     return dim, score
 
@@ -383,6 +378,37 @@ def get_openai_resp(user_input, original_question, dimension_label: str):
             metadata={"source": "task1_general_token"},
         )
         return dimension_label, category
+
+
+    legacy_support = (
+        _parse_legacy_support_output(first)
+        or _parse_legacy_support_output(str(raw))
+    )
+    if legacy_support:
+        current_dimension = str(dimension_label).strip().lower()
+        if current_dimension in {"family_support", "social_support"}:
+            return _task1_dimension_result(
+                dim=current_dimension,
+                score=legacy_support[1],
+                user_input=user_input,
+                original_question=original_question,
+                raw=raw,
+                source="legacy_support_current_dimension",
+                dimension_label=dimension_label,
+            )
+        logger.info(
+            "Rejected ambiguous legacy support score for current dimension %s.",
+            dimension_label,
+        )
+        return _task1_fallback(
+            user_input=user_input,
+            original_question=original_question,
+            raw=raw,
+            source="ambiguous_legacy_support",
+            dimension_label=dimension_label,
+            rejected_dimension="support",
+            rejected_score=legacy_support[1],
+        )
 
     if contract.is_valid:
         return _task1_dimension_result(

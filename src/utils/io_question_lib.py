@@ -3,9 +3,27 @@ import csv
 import os
 from src.utils import config_loader
 
+_LEGACY_SUPPORT_LABELS = {
+    "18": "family_support",
+    "26": "social_support",
+}
+
+
+def migrate_question_lib_labels(question_lib: dict) -> dict:
+    """Upgrade duplicate legacy support labels without changing saved responses."""
+    for item_id, replacement in _LEGACY_SUPPORT_LABELS.items():
+        item_questions = question_lib.get(item_id, {})
+        if not isinstance(item_questions, dict):
+            continue
+        for entry in item_questions.values():
+            if isinstance(entry, dict) and entry.get("label") == "support":
+                entry["label"] = replacement
+    return question_lib
+
+
 def load_question_lib(path: str):
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return migrate_question_lib_labels(json.load(f))
 
 def save_question_lib(path: str, question_lib: dict):
     with open(path, "w", encoding="utf-8") as f:

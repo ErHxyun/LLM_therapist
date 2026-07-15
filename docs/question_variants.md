@@ -104,7 +104,7 @@ Each dimension has three candidate questions. At runtime, CaiTI randomly selects
 2. What has problem solving been like for you lately, and have you felt able to make decisions yourself?
 3. How have you handled recent challenges, and have you been able to decide what to do?
 
-18. Family Support (`support`)
+18. Family Support (`family_support`)
 
 1. Can you tell me about support from your family, and have you felt supported by them?
 2. What has family support looked like recently, and have you been getting help from your family when needed?
@@ -152,7 +152,7 @@ Each dimension has three candidate questions. At runtime, CaiTI randomly selects
 2. What has being out in your community been like, and have you been involved there recently?
 3. How have you connected with your neighborhood or community, and have you been getting out into it?
 
-26. Support from Social Network (`support`)
+26. Support from Social Network (`social_support`)
 
 1. Can you tell me about support outside your family, and do you have someone else in your support network?
 2. Who has been supportive in your social life, and do you have close support besides family?

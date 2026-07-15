@@ -256,7 +256,7 @@
   },
   "18": {
     "1": {
-      "label": "support",
+      "label": "family_support",
       "score": [],
       "notes": [],
       "name": "Family Support",
@@ -376,7 +376,7 @@
   },
   "26": {
     "1": {
-      "label": "support",
+      "label": "social_support",
       "score": [],
       "notes": [],
       "name": "Support from Social Network",

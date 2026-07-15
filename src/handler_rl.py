@@ -5,7 +5,7 @@ import numpy as np
 import os
 import pandas as pd
 
-from src.questioner import ask_question
+from src.questioner import QuestionTurnOutcome, ask_question
 from src.CBT import run_cbt
 from src.session.control import NullSessionControl
 from src.utils.config_loader import (
@@ -152,6 +152,47 @@ class HandlerRL:
         )
         return mask
 
+    def _sync_answered_item_mask(self, item_mask: list[int]) -> int:
+        """Remove dimensions scored incidentally by a multi-segment answer."""
+        cleared = 0
+        for item_index in range(1, min(len(self.question_lib) + 1, len(item_mask) - 1)):
+            if item_mask[item_index] and self._item_is_answered(item_index):
+                item_mask[item_index] = 0
+                cleared += 1
+        if cleared:
+            logger.info("Removed %s cross-scored dimension(s) from the active item mask.", cleared)
+        return cleared
+
+    def _apply_question_outcome_to_mask(
+        self,
+        item_mask: list[int],
+        current_item_index: int,
+        outcome: QuestionTurnOutcome,
+    ) -> set[int]:
+        """Mask only dimensions with committed scores; keep an unanswered current item available."""
+        masked_item_ids: set[int] = set()
+        for item_id in outcome.covered_item_ids:
+            item_index = int(item_id)
+            if 0 < item_index < len(item_mask) - 1:
+                item_mask[item_index] = 0
+                masked_item_ids.add(item_index)
+
+        current_item_index = int(current_item_index)
+        if 0 < current_item_index < len(item_mask) - 1:
+            item_mask[current_item_index] = (
+                0 if outcome.current_answered else 1
+            )
+            if outcome.current_answered:
+                masked_item_ids.add(current_item_index)
+
+        logger.info(
+            "Updated screening mask from question outcome: covered=%s current=%s current_answered=%s",
+            sorted(masked_item_ids),
+            current_item_index,
+            outcome.current_answered,
+        )
+        return masked_item_ids
+
     def _persist_runtime_question_lib(self) -> None:
         save_question_lib(QUESTION_LIB_FILENAME, self.question_lib)
         logger.info("Persisted runtime question library to %s.", QUESTION_LIB_FILENAME)
@@ -192,15 +233,21 @@ class HandlerRL:
                 is_terminated = True
                 logger.info("RL selected non-screening state %s. Proceeding to CBT.", A)
                 break
-            # Mark this item as used
-            item_mask[int(A)] = 0
             # Ask questions for the selected item
             turn_start = len(self.new_response)
-            openai_res, DLA_terminate, last_question_updated = ask_question(
+            question_outcome = ask_question(
                 self.question_lib,
                 int(A),
                 turn_records=self.new_response,
                 session_control=self.session_control,
+            )
+            openai_res = question_outcome.reward
+            DLA_terminate = question_outcome.terminate
+            last_question_updated = question_outcome.previous_question
+            self._apply_question_outcome_to_mask(
+                item_mask,
+                int(A),
+                question_outcome,
             )
             self._persist_runtime_question_lib()
             action_turn_records = self.new_response[turn_start:]

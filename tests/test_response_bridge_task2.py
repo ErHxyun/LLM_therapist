@@ -101,6 +101,52 @@ class ResponseBridgeTask2Test(unittest.TestCase):
             response_bridge._normalize_dim_score("31_motivation", 1),
             ("work_motivation", 1),
         )
+        self.assertEqual(
+            response_bridge._normalize_dim_score("18_support", 2),
+            ("family_support", 2),
+        )
+        self.assertEqual(
+            response_bridge._normalize_dim_score("26_support_social", 1),
+            ("social_support", 1),
+        )
+
+        self.assertEqual(
+            response_bridge._normalize_dim_score("26_support", 0),
+            ("social_support", 0),
+        )
+
+    def test_legacy_bare_support_only_binds_to_current_support_dimension(self):
+        original = response_bridge.classify_dimension_and_score_result
+        try:
+            response_bridge.classify_dimension_and_score_result = (
+                lambda _answer, _question: normalize_task1_output("support, 2")
+            )
+            self.assertEqual(
+                response_bridge.get_openai_resp(
+                    "My family has not been there for me.",
+                    "Have you felt supported by your family?",
+                    "family_support",
+                ),
+                ("family_support", 2),
+            )
+            self.assertEqual(
+                response_bridge.get_openai_resp(
+                    "I do not have friends I can rely on.",
+                    "Do you have someone else in your support network?",
+                    "social_support",
+                ),
+                ("social_support", 2),
+            )
+            self.assertEqual(
+                response_bridge.get_openai_resp(
+                    "My family has not been there for me.",
+                    "Have you been sleeping enough recently?",
+                    "sleep",
+                ),
+                ("NA", 99),
+            )
+        finally:
+            response_bridge.classify_dimension_and_score_result = original
 
     def test_task1_result_is_parsed_for_non_general_response(self):
         original = response_bridge.classify_dimension_and_score_result
@@ -119,7 +165,7 @@ class ResponseBridgeTask2Test(unittest.TestCase):
         finally:
             response_bridge.classify_dimension_and_score_result = original
 
-    def test_task1_dimension_mismatch_is_guarded(self):
+    def test_task1_cross_dimension_result_is_preserved_for_multi_segment_scoring(self):
         original = response_bridge.classify_dimension_and_score_result
         try:
             response_bridge.classify_dimension_and_score_result = (
@@ -131,12 +177,12 @@ class ResponseBridgeTask2Test(unittest.TestCase):
                     "Have you been consistently visiting your doctor, therapist, or case manager?",
                     "care",
                 ),
-                ("NA", 99),
+                ("sleep", 2),
             )
         finally:
             response_bridge.classify_dimension_and_score_result = original
 
-    def test_task1_adjacent_dimension_mismatch_keeps_na_99(self):
+    def test_task1_adjacent_dimension_result_is_preserved(self):
         original = response_bridge.classify_dimension_and_score_result
         try:
             response_bridge.classify_dimension_and_score_result = (
@@ -148,7 +194,7 @@ class ResponseBridgeTask2Test(unittest.TestCase):
                     "Do you have effective strategies to manage stress and difficult emotions?",
                     "coping",
                 ),
-                ("NA", 99),
+                ("emo", 1),
             )
         finally:
             response_bridge.classify_dimension_and_score_result = original
