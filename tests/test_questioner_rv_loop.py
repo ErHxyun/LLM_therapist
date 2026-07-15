@@ -9,15 +9,65 @@ class QuestionerRVLoopTest(unittest.TestCase):
     def setUp(self):
         clear_emotion_results_for_tests()
         self._original_build_emotion_followup_settings = questioner.build_emotion_followup_settings
+        self._original_reflective_summarizer = questioner.reflective_summarizer
         questioner.build_emotion_followup_settings = lambda: EmotionFollowupSettings(False, 0.0, 50, 60, 45)
+        questioner.reflective_summarizer = lambda _question, response: (
+            f"REFLECTIVE_SUMMARIZER: You mentioned that {response}"
+        )
         questioner._PENDING_NEXT_QUESTION_INTRO = ""
         questioner._PENDING_VALIDATION_TEXT = ""
 
     def tearDown(self):
         questioner.build_emotion_followup_settings = self._original_build_emotion_followup_settings
+        questioner.reflective_summarizer = self._original_reflective_summarizer
         questioner._PENDING_NEXT_QUESTION_INTRO = ""
         questioner._PENDING_VALIDATION_TEXT = ""
         clear_emotion_results_for_tests()
+
+    def test_workflow_transition_returns_validation_and_discards_screening_intro(self):
+        questioner._set_pending_validation_text(
+            "VALIDATION: It makes sense that this has been difficult."
+        )
+        questioner._set_pending_next_question_intro(
+            "Thank you for your clarification. Let's continue our questions."
+        )
+
+        validation = questioner.pop_pending_validation_for_workflow_transition()
+
+        self.assertEqual(validation, "It makes sense that this has been difficult.")
+        self.assertEqual(questioner._PENDING_VALIDATION_TEXT, "")
+        self.assertEqual(questioner._PENDING_NEXT_QUESTION_INTRO, "")
+
+    def test_reflective_followup_uses_paper_summarizer_and_cleans_label(self):
+        questioner.reflective_summarizer = lambda question, response: (
+            "REFLECTIVE_SUMMARIZER: You shared that sleep has been difficult."
+        )
+
+        followup, raw, fallback_used = questioner._generate_reflective_followup(
+            "I barely sleep.",
+            "Have you been sleeping enough recently?",
+        )
+
+        self.assertEqual(raw, "REFLECTIVE_SUMMARIZER: You shared that sleep has been difficult.")
+        self.assertEqual(followup, "You shared that sleep has been difficult. Can you tell me more about that?")
+        self.assertFalse(fallback_used)
+
+    def test_reflective_followup_cleans_model_misspelled_label(self):
+        questioner.reflective_summarizer = lambda question, response: (
+            "REFLECTIVE_SUMMERIZER: You shared that sleep has been difficult."
+        )
+
+        followup, raw, fallback_used = questioner._generate_reflective_followup(
+            "I barely sleep.",
+            "Have you been sleeping enough recently?",
+        )
+
+        self.assertEqual(raw, "REFLECTIVE_SUMMERIZER: You shared that sleep has been difficult.")
+        self.assertEqual(
+            followup,
+            "You shared that sleep has been difficult. Can you tell me more about that?",
+        )
+        self.assertFalse(fallback_used)
 
     def test_ask_question_uses_library_question_without_runtime_rewrite(self):
         question_lib = {
@@ -1034,6 +1084,31 @@ class QuestionerRVLoopTest(unittest.TestCase):
         self.assertEqual(question_lib["18"]["1"]["score"], [])
         self.assertEqual(question_lib["26"]["1"]["score"], [0])
 
+
+    def test_classify_segments_exposes_aggregate_per_turn_metrics(self):
+        original = questioner.get_openai_resp
+
+        def fake_get_openai_resp(segment, _question, _dimension, metrics=None):
+            metrics["analyzer_call_count"] = 0 if segment == "Yes" else 1
+            metrics["batch_fallback"] = False
+            return ("sleep", "Yes") if segment == "Yes" else ("eat", 0)
+
+        try:
+            questioner.get_openai_resp = fake_get_openai_resp
+            result = questioner.classify_segments(
+                ["Yes", "I eat regularly"],
+                "Have you been sleeping enough recently?",
+                "sleep",
+            )
+        finally:
+            questioner.get_openai_resp = original
+
+        self.assertEqual(result, [("sleep", "Yes"), ("eat", 0)])
+        self.assertEqual(result.metrics["segment_count"], 2)
+        self.assertEqual(result.metrics["analyzer_call_count"], 1)
+        self.assertEqual(len(result.metrics["segment_latencies_ms"]), 2)
+        self.assertGreaterEqual(result.metrics["analyzer_latency_ms"], 0.0)
+        self.assertFalse(result.metrics["batch_fallback"])
 
 if __name__ == "__main__":
     unittest.main()

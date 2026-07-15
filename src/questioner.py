@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Any
@@ -14,6 +15,7 @@ from src.emotion import (
 )
 from src.runtime.status_monitor import get_active_status_monitor
 from src.utils.response_bridge import get_openai_resp, is_explicit_stop_request
+from src.response_analyzer import reflective_summarizer
 from src.utils.text_generators import (
     generate_change,
     generate_change_positive,
@@ -149,6 +151,19 @@ def _strip_spoken_label(text: str) -> str:
     return cleaned
 
 
+def pop_pending_validation_for_workflow_transition() -> str:
+    """Return validation that must be spoken before leaving screening.
+
+    The normal screening path consumes validation together with the next
+    question.  When screening ends immediately after R-V, there is no next
+    screening question, so the handler transfers the validation to the first
+    CBT output instead.  The screening-only continuation is discarded.
+    """
+    validation = _strip_spoken_label(_pop_pending_validation_text())
+    _pop_pending_next_question_intro()
+    return validation
+
+
 def _compose_question_with_intro(question_text: str) -> str:
     validation = _strip_spoken_label(_pop_pending_validation_text())
     intro = _pop_pending_next_question_intro()
@@ -258,7 +273,10 @@ def _checkpoint_requested_skip_to_cbt(session_control=None) -> bool:
     return method("screening") == "skip_to_cbt"
 
 
-def _build_reflective_followup(original_response: str, original_question: str = "") -> str:
+def _fallback_reflective_followup(
+    original_response: str,
+    original_question: str = "",
+) -> str:
     response = " ".join(str(original_response or "").split())
     question = " ".join(str(original_question or "").split())
     if response:
@@ -268,6 +286,46 @@ def _build_reflective_followup(original_response: str, original_question: str = 
         return f'You mentioned "{response}"{ending} Can you tell me more about that?'
     return "Can you tell me more about that?"
 
+
+def _clean_reflective_summary(text: str) -> str:
+    cleaned = " ".join(str(text or "").split()).strip()
+    return re.sub(
+        r"^REFLECTIVE_(?:SUMMARIZER|SUMMERIZER)\s*:\s*",
+        "",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def _generate_reflective_followup(
+    original_response: str,
+    original_question: str = "",
+) -> tuple[str, str, bool]:
+    """Return (spoken follow-up, raw model output, fallback_used)."""
+    fallback = _fallback_reflective_followup(original_response, original_question)
+    response = " ".join(str(original_response or "").split())
+    question = " ".join(str(original_question or "").split())
+    if not response:
+        return fallback, "", True
+    try:
+        raw = reflective_summarizer(question, response)
+    except Exception as exc:
+        logger.warning("Reflective Summarizer failed; using bounded fallback: %s", exc)
+        return fallback, "", True
+    summary = _clean_reflective_summary(raw)
+    if not summary:
+        return fallback, str(raw or ""), True
+    if "can you tell me more" in summary.casefold():
+        return summary, str(raw or ""), False
+    ending = "" if summary[-1] in ".!?" else "."
+    return f"{summary}{ending} Can you tell me more about that?", str(raw or ""), False
+
+
+def _build_reflective_followup(original_response: str, original_question: str = "") -> str:
+    followup, _, _ = _generate_reflective_followup(original_response, original_question)
+    return followup
+
 def _log_reflective_followup(
     *,
     dimension: str,
@@ -275,6 +333,9 @@ def _log_reflective_followup(
     segment_text: str,
     question_text: str,
     followup_text: str,
+    raw_output: str,
+    latency_ms: float,
+    fallback_used: bool,
 ) -> None:
     log_llm_event(
         task="reflective_summarizer",
@@ -282,9 +343,13 @@ def _log_reflective_followup(
         score=score,
         segment_text=segment_text,
         question_text=question_text,
-        raw_llm_output=followup_text,
+        raw_llm_output=raw_output,
         normalized_output=followup_text,
-        metadata={"mode": "simple_reflection"},
+        metadata={
+            "mode": "paper_reflective_summarizer",
+            "latency_ms": round(latency_ms, 2),
+            "fallback_used": fallback_used,
+        },
     )
 
 
@@ -409,35 +474,67 @@ def _build_followup_for_score(
     if emotion_decision and emotion_decision.should_follow_up:
         return emotion_decision.followup_text, emotion_decision
     if score > 1:
-        followup_text = _build_reflective_followup(answer_text, original_question)
+        started_at = time.monotonic()
+        followup_text, raw_output, fallback_used = _generate_reflective_followup(
+            answer_text,
+            original_question,
+        )
+        latency_ms = (time.monotonic() - started_at) * 1000.0
         _log_reflective_followup(
             dimension=dimension,
             score=score,
             segment_text=answer_text,
             question_text=original_question,
             followup_text=followup_text,
+            raw_output=raw_output,
+            latency_ms=latency_ms,
+            fallback_used=fallback_used,
         )
         return followup_text, emotion_decision
     return "", emotion_decision
 
+class ClassificationResults(list):
+    """List-compatible classifications with per-turn performance metadata."""
+
+    def __init__(self, values=(), metrics=None):
+        super().__init__(values)
+        self.metrics = dict(metrics or {})
+
+
 def classify_segments(user_segments: List[str], original_question: str, dimension_label: str) -> List[Tuple[str, int]]:
-    """
-    Classifies each user segment using the OpenAI response bridge.
-    Returns a list of (dimension, keyword_or_score) tuples for each non-empty segment.
-    - For general answers (Yes/No/Stop/Maybe/Question): (dimension_label, Keyword)
-    - For scored outputs: (dimension, score:int in [0,1,2])
-    """
-    logger.info("Classifying user segments. Total segments: %d", len(user_segments))
+    """Classify every non-empty segment and retain aggregate call metrics."""
+    nonempty_segments = [str(segment).strip() for segment in user_segments if str(segment).strip()]
+    logger.info("Classifying user segments. Total segments: %d", len(nonempty_segments))
     result = []
-    for seg in user_segments:
-        if not seg:
-            # Skip empty segments
-            continue
-        label, score = get_openai_resp(seg, original_question, dimension_label)
+    analyzer_call_count = 0
+    analyzer_latency_ms = 0.0
+    segment_latencies_ms = []
+    batch_fallback = False
+    for seg in nonempty_segments:
+        call_metrics = {}
+        started_at = time.monotonic()
+        label, score = get_openai_resp(
+            seg,
+            original_question,
+            dimension_label,
+            metrics=call_metrics,
+        )
+        elapsed_ms = (time.monotonic() - started_at) * 1000.0
+        analyzer_latency_ms += elapsed_ms
+        segment_latencies_ms.append(round(elapsed_ms, 2))
+        analyzer_call_count += int(call_metrics.get("analyzer_call_count", 0))
+        batch_fallback = batch_fallback or bool(call_metrics.get("batch_fallback", False))
         logger.debug("Segment classified: '%s' -> (dim: %s, val: %s)", seg, label, str(score))
         result.append((label, score))
-    logger.info("Classification complete. Results: %s", str(result))
-    return result
+    metrics = {
+        "segment_count": len(nonempty_segments),
+        "analyzer_call_count": analyzer_call_count,
+        "analyzer_latency_ms": round(analyzer_latency_ms, 2),
+        "segment_latencies_ms": segment_latencies_ms,
+        "batch_fallback": batch_fallback,
+    }
+    logger.info("Classification complete. Results: %s metrics=%s", str(result), metrics)
+    return ClassificationResults(result, metrics)
 
 
 
@@ -754,6 +851,7 @@ def _run_score2_reflection_validation(
     validation_prefix: str = "",
 ) -> Dict[str, Any]:
     """Run one interactive R-V cycle without committing its provisional Score 2."""
+    rv_latency_ms = 0.0
     spoken_validation = _strip_spoken_label(validation_prefix)
     prompt = (
         f"{spoken_validation} {followup_text}".strip()
@@ -783,12 +881,14 @@ def _run_score2_reflection_validation(
             "Running ReflectionValidation reasoner for provisional dimension '%s'.",
             assessment.dimension,
         )
+        rv_call_started = time.monotonic()
         rv_decision_raw = rv_reasoner(
             assessment.dimension,
             original_question,
             assessment.text,
             user_response,
         )
+        rv_latency_ms += (time.monotonic() - rv_call_started) * 1000.0
         rv_decision_raws.append(str(rv_decision_raw))
         rv_decision_token = parse_rv_decision(rv_decision_raw, default="1")
         logger.info("ReflectionValidation decision: %s", rv_decision_token)
@@ -803,12 +903,14 @@ def _run_score2_reflection_validation(
             )
             break
 
+        rv_call_started = time.monotonic()
         rv_guide_text = rv_guide(
             assessment.dimension,
             original_question,
             assessment.text,
             user_response,
         )
+        rv_latency_ms += (time.monotonic() - rv_call_started) * 1000.0
         rv_guide_texts.append(rv_guide_text)
         log_question(rv_guide_text)
         user_response = _get_resp_log_with_control(session_control)
@@ -831,12 +933,14 @@ def _run_score2_reflection_validation(
             "Running ReflectionValidation validator for provisional dimension '%s'.",
             assessment.dimension,
         )
+        rv_call_started = time.monotonic()
         validation_text = rv_validation(
             assessment.dimension,
             original_question,
             assessment.text,
             user_response,
         )
+        rv_latency_ms += (time.monotonic() - rv_call_started) * 1000.0
 
     retry_exhausted = (
         rv_decision_token != "0"
@@ -867,16 +971,19 @@ def _run_score2_reflection_validation(
         "followup_text": followup_text,
         "validation_text": validation_text,
         "notes": notes,
+        "rv_latency_ms": round(rv_latency_ms, 2),
     }
 
 
 
-def evaluate_result(question_lib, DLA_result, S, question_A, user_input, original_question_asked, session_control=None):
+def evaluate_result(question_lib, DLA_result, S, question_A, user_input, original_question_asked, session_control=None, metrics=None):
     """
     Evaluate the result of a user's response to a question.
     Updates the question library and last question as needed.
     ReflectionValidation three steps（topic = the dimension label of the current question）
     """
+    if isinstance(metrics, dict):
+        metrics.setdefault("rv_latency_ms", 0.0)
     logger.info(f"Evaluating result for item {S}, question {question_A}.")
     # If valid user response, update the question library and last question
     outcome = _if_valid_response(
@@ -1005,6 +1112,9 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
                 session_control=session_control,
                 validation_prefix=validation_prefix,
             )
+            if isinstance(metrics, dict):
+                metrics["rv_latency_ms"] += float(rv_run.get("rv_latency_ms", 0.0))
+                metrics["rv_latency_ms"] = round(metrics["rv_latency_ms"], 2)
             target_item = str(assessment.item_id)
             target_questions = question_lib[target_item]
             target_question = next(
@@ -1156,13 +1266,31 @@ def ask_question(
             if _checkpoint_requested_skip_to_cbt(session_control):
                 logger.info("Screening question interrupted by skip-to-CBT request.")
                 return finish_question(0.0, 1, previous_question)
-            # Classify the user response into DLA result segments
+            # Classify and evaluate while retaining processing metrics.
+            attempt_started_at = time.monotonic()
             dimension_label = question_lib[str(S)][str(question_A)]["label"]
-            DLA_result = [[label, score] for (label, score) in classify_segments(user_input, question_text, dimension_label)]
-            # Evaluate the result and update state
+            classification_result = classify_segments(
+                user_input, question_text, dimension_label
+            )
+            attempt_metrics = dict(getattr(classification_result, "metrics", {}))
+            attempt_metrics.setdefault("segment_count", len(user_input))
+            attempt_metrics.setdefault("analyzer_call_count", len(classification_result))
+            attempt_metrics.setdefault("analyzer_latency_ms", 0.0)
+            attempt_metrics.setdefault("batch_fallback", False)
+            DLA_result = [[label, score] for label, score in classification_result]
             score_before = list(question_lib[str(S)][str(question_A)]["score"])
             valid, DLA_terminate, previous_question, question_lib = evaluate_result(
-                question_lib, DLA_result, S, question_A, user_input, question_text, session_control=session_control
+                question_lib,
+                DLA_result,
+                S,
+                question_A,
+                user_input,
+                question_text,
+                session_control=session_control,
+                metrics=attempt_metrics,
+            )
+            attempt_metrics["total_turn_latency_ms"] = round(
+                (time.monotonic() - attempt_started_at) * 1000.0, 2
             )
             if turn_records is not None:
                 turn_records.append(
@@ -1179,6 +1307,7 @@ def ask_question(
                         terminate=DLA_terminate,
                         attempt="initial",
                         triggered_reflection=bool(previous_question),
+                        metrics=attempt_metrics,
                     )
                 )
             # If the answer is invalid (valid == 0) and the process has not been terminated (DLA_terminate == 0), 
@@ -1204,13 +1333,31 @@ def ask_question(
                 if _checkpoint_requested_skip_to_cbt(session_control):
                     logger.info("Screening retry interrupted by skip-to-CBT request.")
                     return finish_question(0.0, 1, previous_question)
-                # Classify the new user response
+                # Re-run classification and evaluation with fresh retry metrics.
+                attempt_started_at = time.monotonic()
                 dimension_label = question_lib[str(S)][str(question_A)]["label"]
-                DLA_result = [[label, score] for (label, score) in classify_segments(user_input, question_text, dimension_label)]
-                # Re-evaluate the new answer and update state accordingly
+                classification_result = classify_segments(
+                    user_input, question_text, dimension_label
+                )
+                attempt_metrics = dict(getattr(classification_result, "metrics", {}))
+                attempt_metrics.setdefault("segment_count", len(user_input))
+                attempt_metrics.setdefault("analyzer_call_count", len(classification_result))
+                attempt_metrics.setdefault("analyzer_latency_ms", 0.0)
+                attempt_metrics.setdefault("batch_fallback", False)
+                DLA_result = [[label, score] for label, score in classification_result]
                 score_before = list(question_lib[str(S)][str(question_A)]["score"])
                 valid, DLA_terminate, previous_question, question_lib = evaluate_result(
-                    question_lib, DLA_result, S, question_A, user_input, question_text, session_control=session_control
+                    question_lib,
+                    DLA_result,
+                    S,
+                    question_A,
+                    user_input,
+                    question_text,
+                    session_control=session_control,
+                    metrics=attempt_metrics,
+                )
+                attempt_metrics["total_turn_latency_ms"] = round(
+                    (time.monotonic() - attempt_started_at) * 1000.0, 2
                 )
                 if turn_records is not None:
                     turn_records.append(
@@ -1227,6 +1374,7 @@ def ask_question(
                             terminate=DLA_terminate,
                             attempt="retry",
                             triggered_reflection=bool(previous_question),
+                            metrics=attempt_metrics,
                         )
                     )
         

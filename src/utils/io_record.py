@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import time
 import threading
@@ -124,6 +125,22 @@ def log_system_message(text: str):
     """Log a user-facing message that should be spoken without collecting STT."""
     _log_question_record(text, expects_response=False)
 
+_SEGMENT_BOUNDARY_RE = re.compile(
+    r"(?<!\d)\.(?!\d)|[!?;]+|,\s*(?:and|but)\b\s*|\s+\bbut\b\s+",
+    flags=re.IGNORECASE,
+)
+
+
+def segment_user_response(user_input: str) -> list[str]:
+    """Split independent clauses without matching substrings such as butter."""
+    segments = []
+    for part in _SEGMENT_BOUNDARY_RE.split(str(user_input or "")):
+        cleaned = " ".join(part.split()).strip()
+        if cleaned:
+            segments.append(cleaned)
+    return segments
+
+
 def get_answer(should_stop=None):
     while True:
         if callable(should_stop) and should_stop():
@@ -138,17 +155,8 @@ def get_answer(should_stop=None):
                 _write(data)
                 _publish_response_status(user_input)
                 break
-    user_input = str(user_input)
-    user_input = user_input.replace(", and", ".").replace("but", ".")
-    user_input = user_input.split(".")
-    DLA_result, segments = [], []
-    for seg in user_input:
-        if not seg:
-            continue
-        if seg[0] == " ":
-            seg = seg[1:]
-        segments.append(seg)
-    return DLA_result, segments
+    segments = segment_user_response(user_input)
+    return [], segments
 
 def get_resp_log(should_stop=None):
     while True:

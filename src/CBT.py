@@ -479,9 +479,80 @@ def _stage3_guide_oversteps(guide: str) -> bool:
     )
     return any(marker in lower for marker in overstep_markers)
 
+def _screening_note_lines(entry: dict) -> list[str]:
+    lines = []
+    for note_entry in entry.get("notes", []):
+        if not isinstance(note_entry, list):
+            continue
+        for value in note_entry:
+            if not isinstance(value, str):
+                continue
+            cleaned = " ".join(value.split())
+            if cleaned and not cleaned.startswith("CBT_"):
+                lines.append(cleaned)
+    return lines
+
+
+def extract_rv_user_responses(entry: dict) -> list[str]:
+    """Return every distinct user response retained by the R-V history."""
+    responses = []
+    seen = set()
+    pattern = re.compile(r"^(?:original_resp|followup_resp(?:_\d+)?):\s*(.+)$")
+    for line in _screening_note_lines(entry):
+        match = pattern.match(line)
+        if not match:
+            continue
+        response = match.group(1).strip()
+        key = response.casefold()
+        if response and key not in seen:
+            seen.add(key)
+            responses.append(response)
+    return responses
+
+
+def build_cbt_dimension_history(entry: dict) -> str:
+    """Serialize the complete screening/R-V history for one CBT candidate."""
+    label = str(entry.get("label", "")).strip()
+    name = str(entry.get("name", label)).strip()
+    questions = entry.get("question", [])
+    if isinstance(questions, str):
+        questions = [questions]
+    question_lines = [
+        f"- {' '.join(str(question).split())}"
+        for question in questions
+        if str(question).strip()
+    ]
+    note_lines = [f"- {line}" for line in _screening_note_lines(entry)]
+    score_text = ", ".join(str(score) for score in entry.get("score", []))
+    return "\n".join([
+        f"DIMENSION: {name} [{label}]",
+        f"SCORES: {score_text}",
+        "FIXED QUESTIONS:",
+        *(question_lines or ["- none recorded"]),
+        "SCREENING AND R-V NOTES:",
+        *(note_lines or ["- none recorded"]),
+    ])
+
+
+def build_cbt_statement(entry: dict) -> str:
+    """Build Stage 1 context from all retained user responses, in order."""
+    responses = extract_rv_user_responses(entry)
+    if responses:
+        return " ".join(responses)
+    name = str(entry.get("name", entry.get("label", "this topic"))).strip()
+    return f"During screening, the user identified difficulty with {name}."
+
+
+def clean_stage0_question(text: str) -> str:
+    raw = re.sub(r"^\s*QUESTION\s*:\s*", "", str(text or ""), flags=re.IGNORECASE)
+    return " ".join(raw.split()).strip()
+
+
 def stage0_prompter(history: str) -> str:
     payload = f"HISTORY: {history}"
-    return _chat_complete(PROMPTER_CBT_STAGE0_PROMPT, payload)
+    raw = _chat_complete(PROMPTER_CBT_STAGE0_PROMPT, payload)
+    question = clean_stage0_question(raw)
+    return question
 
 def stage1_reasoner(statement: str, unhelpful_thoughts: str, dimension: str | None = None) -> str:
     payload = _format_stage1_input(statement, unhelpful_thoughts)
@@ -713,18 +784,29 @@ def run_cbt(question_lib, session_control=None):
         log_system_message("We do not have a dimension at score 2 to work on today. We will conclude here.")
         return
 
-    # Stage 0: directly ask the user to choose a dimension by the shown index
-    lines = [
-        "Thank you for answering the questions.",
-        "According to your previous responses, you have issue in:",
-    ]
+    # Stage 0: let the paper prompter review all score-2 screening/R-V history.
+    stage0_history = "\n\n".join(
+        build_cbt_dimension_history(question_lib[str(i0)][str(j0)])
+        for _, i0, j0, _, _ in candidates
+    )
+    try:
+        stage0_question = stage0_prompter(stage0_history)
+    except Exception as exc:
+        logger.warning("CBT Stage 0 prompter failed; using bounded fallback: %s", exc)
+        stage0_question = ""
+    if not stage0_question:
+        stage0_question = (
+            "Thank you for answering the questions. Based on your earlier responses, "
+            "which of these topics would you like to work on today?"
+        )
+
+    lines = [stage0_question, "Available topics:"]
     for k, _, _, _, name0 in candidates:
         lines.append(f"{k}) {name0}")
     lines.append(
-        "Which dimension would you like to work on today? "
         "Tell me the dimension number. For example: 1"
     )
-    q0_clean = " \n".join(lines)
+    q0_clean = "\n".join(lines)
     session_control.checkpoint("cbt")
     log_question(q0_clean)
     resp = _get_resp_log_with_control(session_control)
@@ -770,42 +852,18 @@ def run_cbt(question_lib, session_control=None):
     logger.info(f"CBT dimension chosen: [{label_sel}] ({name_sel}) at ({i_sel},{j_sel}).")
     session_control.checkpoint("cbt")
 
-    # Stage 1: derive statement from RV notes of the chosen dimension
-    # Prefer the latest RV follow-up response (followup_resp_1),
-    # then fallback to followup_resp, then original_resp.
-    statement = ""
-    notes_list = question_lib[str(i_sel)][str(j_sel)].get("notes", [])
-    for note_entry in reversed(notes_list):
-        if not isinstance(note_entry, list):
-            continue
-        # Only consider RV note entries by checking the presence of rv fields
-        has_rv_field = any((isinstance(x, str) and ("rv_decision:" in x or "rv_validation:" in x)) for x in note_entry)
-        if not has_rv_field:
-            continue
-        # Try to extract in priority order
-        for s in note_entry:
-            if isinstance(s, str) and s.startswith("followup_resp_1: "):
-                statement = s.split(": ", 1)[1]
-                break
-        if statement:
-            break
-        for s in note_entry:
-            if isinstance(s, str) and s.startswith("followup_resp: "):
-                statement = s.split(": ", 1)[1]
-                break
-        if statement:
-            break
-        for s in note_entry:
-            if isinstance(s, str) and s.startswith("original_resp: "):
-                statement = s.split(": ", 1)[1]
-                break
-        if statement:
-            break
+    # Stage 1 uses every distinct user response retained for this dimension.
+    selected_entry = question_lib[str(i_sel)][str(j_sel)]
+    statement = build_cbt_statement(selected_entry)
+    logger.info(
+        "Built CBT Stage 1 statement from %s retained R-V response(s).",
+        len(extract_rv_user_responses(selected_entry)),
+    )
 
-    # Add recap prefix (similar to RV), then ask to identify unhelpful thoughts
+    # Make the selected dimension's complete response history visible to the user.
     recap = (
         f"Let us work on dimension '{name_sel}'. "
-        f"From our record, you mentioned that: {statement}"
+        f"Across our screening conversation, you described: {statement}"
     )
     set_question_prefix(recap)
     log_question("Can you try to identify any unhelpful thoughts you have that contribute to this situation?")

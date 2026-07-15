@@ -90,6 +90,49 @@ class HandlerRLRestartMaskTest(unittest.TestCase):
         self.assertEqual(mask, [0, 1, 1, 0])
 
 
+    def test_active_q_table_update_is_visible_to_next_step(self):
+        handler = HandlerRL()
+        active_q_table = handler_rl.pd.DataFrame(
+            [[0.0, 0.0], [0.0, 0.0]],
+            columns=["0", "1"],
+        )
+
+        before, after, target = handler._update_active_item_q_table(
+            active_q_table, 0, "1", "terminal", 2.0
+        )
+
+        self.assertEqual(before, 0.0)
+        self.assertEqual(target, 2.0)
+        self.assertAlmostEqual(after, handler_rl.ALPHA * 2.0)
+        self.assertEqual(active_q_table.loc[0, "1"], after)
+        before_next, _, _ = handler._update_active_item_q_table(
+            active_q_table, 0, "1", "terminal", 2.0
+        )
+        self.assertEqual(before_next, after)
+
+    def test_terminal_screening_validation_is_queued_for_first_cbt_output(self):
+        handler = HandlerRL()
+        queued_prefixes = []
+        original_pop = handler_rl.pop_pending_validation_for_workflow_transition
+        original_set_prefix = handler_rl.set_question_prefix
+
+        try:
+            handler_rl.pop_pending_validation_for_workflow_transition = (
+                lambda: "It makes sense that this has been difficult."
+            )
+            handler_rl.set_question_prefix = lambda text: queued_prefixes.append(text)
+
+            transferred = handler._queue_pending_screening_validation_for_cbt()
+        finally:
+            handler_rl.pop_pending_validation_for_workflow_transition = original_pop
+            handler_rl.set_question_prefix = original_set_prefix
+
+        self.assertEqual(
+            transferred,
+            "It makes sense that this has been difficult.",
+        )
+        self.assertEqual(queued_prefixes, [transferred])
+
     def test_persist_runtime_question_lib_writes_canonical_user_file(self):
         handler = HandlerRL()
         handler.question_lib = {

@@ -5,7 +5,11 @@ import numpy as np
 import os
 import pandas as pd
 
-from src.questioner import QuestionTurnOutcome, ask_question
+from src.questioner import (
+    QuestionTurnOutcome,
+    ask_question,
+    pop_pending_validation_for_workflow_transition,
+)
 from src.CBT import run_cbt
 from src.session.control import NullSessionControl
 from src.utils.config_loader import (
@@ -197,6 +201,33 @@ class HandlerRL:
         save_question_lib(QUESTION_LIB_FILENAME, self.question_lib)
         logger.info("Persisted runtime question library to %s.", QUESTION_LIB_FILENAME)
 
+    def _queue_pending_screening_validation_for_cbt(self) -> str:
+        """Move terminal screening validation onto the first CBT output."""
+        validation = pop_pending_validation_for_workflow_transition()
+        if validation:
+            set_question_prefix(validation)
+            logger.info(
+                "Queued terminal screening validation for delivery before the first CBT output."
+            )
+        return validation
+
+    def _update_active_item_q_table(
+        self,
+        q_table,
+        state,
+        action,
+        next_state,
+        reward,
+    ) -> tuple[float, float, float]:
+        """Apply one Q update in place so the next selection sees it."""
+        q_before = q_table.loc[state, action]
+        if next_state == "terminal":
+            q_target = reward
+        else:
+            q_target = reward + GAMMA * q_table.iloc[int(next_state), :].max()
+        q_table.loc[state, action] = q_before + ALPHA * (q_target - q_before)
+        return q_before, q_table.loc[state, action], q_target
+
     def run(self):
         """
         Main RL loop for the entire screening process.
@@ -209,7 +240,7 @@ class HandlerRL:
         # "Hello CaiTI" or delay the first real screening question.
         set_question_prefix(OPENING_GREETING)
         time.sleep(0.5)
-        new_q_table = self.item_q_table.copy()
+        active_q_table = self.item_q_table.copy()
         S = 0  # Start state for item RL
         is_terminated = False
         dimension_count = len(self.question_lib)
@@ -228,7 +259,7 @@ class HandlerRL:
                 logger.info("All items have been asked. Proceeding to CBT.")
                 break
             # Select an item to ask about using RL policy
-            A = choose_action(S, self.item_q_table, item_mask, ITEM_N_STATES, self.item_actions, self.item_action_labels)
+            A = choose_action(S, active_q_table, item_mask, ITEM_N_STATES, self.item_actions, self.item_action_labels)
             if int(A) < 1 or int(A) > dimension_count:
                 is_terminated = True
                 logger.info("RL selected non-screening state %s. Proceeding to CBT.", A)
@@ -255,15 +286,16 @@ class HandlerRL:
             self.last_question = last_question_updated
             # Get next state and reward for item RL
             S_, R = get_env_feedback(S, A, openai_res, DLA_terminate, item_mask)
-            # Q-learning update for item Q-table
-            q_predict = self.item_q_table.loc[S, A]
-            if S_ != 'terminal':
-                q_target = R + GAMMA * self.item_q_table.iloc[S_, :].max()
-            else:
-                q_target = R
+            # Update the same table used by the next choose_action call.
+            q_predict, q_after, q_target = self._update_active_item_q_table(
+                active_q_table,
+                S,
+                A,
+                S_,
+                R,
+            )
+            if S_ == "terminal":
                 is_terminated = True
-            new_q_table.loc[S, A] += ALPHA * (q_target - q_predict)
-            q_after = new_q_table.loc[S, A]
             trace_record = {
                 "RunID": self.run_id,
                 "SubjectID": SUBJECT_ID,
@@ -282,6 +314,12 @@ class HandlerRL:
                 "QAfter": q_after,
                 "Terminate": DLA_terminate,
                 "AttemptCount": len(action_turn_records),
+                "SegmentCount": primary_turn.get("SegmentCount", 0),
+                "AnalyzerCallCount": primary_turn.get("AnalyzerCallCount", 0),
+                "AnalyzerLatencyMs": primary_turn.get("AnalyzerLatencyMs", 0.0),
+                "RVLatencyMs": primary_turn.get("RVLatencyMs", 0.0),
+                "TotalTurnLatencyMs": primary_turn.get("TotalTurnLatencyMs", 0.0),
+                "BatchFallback": primary_turn.get("BatchFallback", 0),
             }
             self.rl_trace_records.append(trace_record)
             for turn_record in action_turn_records:
@@ -313,7 +351,7 @@ class HandlerRL:
             # Save Q tables (in parallel with existing results)
             qdir = os.path.join(DATA_DIR, "q_tables")
             qfile = self.q_table_file
-            self.item_q_table = new_q_table
+            self.item_q_table = active_q_table
             dir_preexisted = os.path.exists(qdir)
             if not dir_preexisted:
                 os.makedirs(qdir, exist_ok=True)
@@ -343,6 +381,7 @@ class HandlerRL:
 
         # Run CBT after the screening loop concludes
         self.session_control.mark_cbt()
+        self._queue_pending_screening_validation_for_cbt()
         run_cbt(self.question_lib, session_control=self.session_control)
         logger.info("Completed CBT flow.")
         self._persist_runtime_question_lib()

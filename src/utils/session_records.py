@@ -24,6 +24,12 @@ RL_TRACE_FIELDS = [
     "QAfter",
     "Terminate",
     "AttemptCount",
+    "SegmentCount",
+    "AnalyzerCallCount",
+    "AnalyzerLatencyMs",
+    "RVLatencyMs",
+    "TotalTurnLatencyMs",
+    "BatchFallback",
 ]
 
 
@@ -73,8 +79,10 @@ def build_question_attempt_record(
     terminate: int,
     attempt: str,
     triggered_reflection: bool,
+    metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     score = latest_added_score(score_before, score_after)
+    metrics = dict(metrics or {})
     return {
         "item": item_id,
         "question": question_index,
@@ -88,6 +96,12 @@ def build_question_attempt_record(
         "Terminate": int(terminate),
         "Attempt": attempt,
         "Triggered_reflection": int(bool(triggered_reflection)),
+        "SegmentCount": int(metrics.get("segment_count", 0)),
+        "AnalyzerCallCount": int(metrics.get("analyzer_call_count", 0)),
+        "AnalyzerLatencyMs": float(metrics.get("analyzer_latency_ms", 0.0)),
+        "RVLatencyMs": float(metrics.get("rv_latency_ms", 0.0)),
+        "TotalTurnLatencyMs": float(metrics.get("total_turn_latency_ms", 0.0)),
+        "BatchFallback": int(bool(metrics.get("batch_fallback", False))),
         "Timestamp": now_iso(),
     }
 

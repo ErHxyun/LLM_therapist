@@ -66,6 +66,18 @@ def is_explicit_stop_request(text: str) -> bool:
         return True
     return bool(_EXPLICIT_STOP_PATTERN.search(s))
 
+def _exact_general_label(user_input: str) -> str | None:
+    """Handle only unambiguous one-token responses without an LLM call."""
+    bare = _strip_outer_punctuation(_normalize_general_text(user_input))
+    if bare in {"yes", "yeah", "yep", "yup"}:
+        return "Yes"
+    if bare in {"no", "nope", "nah"}:
+        return "No"
+    if bare in {"stop", "quit", "exit", "cancel"}:
+        return "Stop"
+    return None
+
+
 
 def _heuristic_general_label(user_input: str) -> str | None:
     s = _normalize_general_text(user_input)
@@ -321,20 +333,46 @@ def classify_with_task2(user_input: str, dimension_label: str):
     return None
 
 
-def get_openai_resp(user_input, original_question, dimension_label: str):
+def get_openai_resp(user_input, original_question, dimension_label: str, metrics: dict | None = None):
     """
     Main entry point to process model response or user input and extract a unified tuple.
     For general Yes/No/Stop/Maybe/Question answers, returns (dimension_label, Keyword).
     Otherwise, attempts to return (dimension, score:int) parsed from model output.
     Fallbacks to ('NA', 99) on parse failure.
     """
+    call_metrics = metrics if isinstance(metrics, dict) else {}
+    call_metrics.setdefault("analyzer_call_count", 0)
+    call_metrics.setdefault("batch_fallback", False)
+
+    exact_category = _exact_general_label(user_input)
+    if exact_category:
+        call_metrics["source"] = "exact_general_fast_path"
+        log_llm_event(
+            task=LLMTask.TASK2_GENERAL_RESPONSE,
+            dimension=dimension_label,
+            score=exact_category,
+            segment_text=user_input,
+            question_text=original_question,
+            raw_llm_output="",
+            normalized_output=f"{dimension_label}, {exact_category}",
+            metadata={
+                "source": "exact_general_fast_path",
+                "model_called": False,
+            },
+        )
+        return dimension_label, exact_category
+
     if _looks_like_general_response(user_input):
+        call_metrics["analyzer_call_count"] += 1
+        call_metrics["source"] = "task2"
         general = classify_with_task2(user_input, dimension_label)
         if general:
             return general
 
     try:
         # Use the response analyzer to try to classify the input
+        call_metrics["analyzer_call_count"] += 1
+        call_metrics["source"] = "task1"
         contract = classify_dimension_and_score_result(user_input, original_question)
         raw = contract.raw_output
         # Take just the first line (in case of multi-line output)

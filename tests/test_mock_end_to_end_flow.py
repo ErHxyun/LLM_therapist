@@ -75,6 +75,7 @@ class MockEndToEndFlowTest(unittest.TestCase):
         ])
         logged_questions = []
         prefixes = []
+        stage0_histories = []
 
         originals = {
             "response_bridge.classify_dimension_and_score_result": (
@@ -86,12 +87,14 @@ class MockEndToEndFlowTest(unittest.TestCase):
             "questioner.log_question": questioner.log_question,
             "questioner.rv_guide": questioner.rv_guide,
             "questioner.rv_validation": questioner.rv_validation,
+            "questioner.reflective_summarizer": questioner.reflective_summarizer,
             "CBT.get_resp_log": CBT.get_resp_log,
             "CBT.log_question": CBT.log_question,
             "CBT.log_system_message": CBT.log_system_message,
             "CBT.set_question_prefix": CBT.set_question_prefix,
             "CBT.llm_complete_task": CBT.llm_complete_task,
             "CBT.recap_stage3_challenge": CBT.recap_stage3_challenge,
+            "CBT.stage0_prompter": CBT.stage0_prompter,
         }
 
         def fake_rv_complete_task(task, system_content, user_content, max_new_tokens=None):
@@ -111,6 +114,12 @@ class MockEndToEndFlowTest(unittest.TestCase):
                 raw_text="0",
             )
 
+        def fake_stage0_prompter(history):
+            stage0_histories.append(history)
+            return (
+                "Based on your earlier responses, which topic would you like to work on?"
+            )
+
         try:
             response_bridge.classify_dimension_and_score_result = (
                 lambda _answer, _question: normalize_task1_output("1_weight, 2")
@@ -121,6 +130,9 @@ class MockEndToEndFlowTest(unittest.TestCase):
             questioner.log_question = lambda text: logged_questions.append(text)
             questioner.rv_guide = lambda *_args: "Guide: Please return to the weight change."
             questioner.rv_validation = lambda *_args: "VALIDATION: That connects to the weight change."
+            questioner.reflective_summarizer = lambda _question, response: (
+                f"REFLECTIVE_SUMMARIZER: You mentioned that {response}"
+            )
 
             dla_result = questioner.classify_segments(user_segments, question_text, "weight")
             valid, terminate, previous, updated = questioner.evaluate_result(
@@ -141,6 +153,7 @@ class MockEndToEndFlowTest(unittest.TestCase):
             CBT.log_system_message = lambda text: logged_questions.append(text)
             CBT.set_question_prefix = lambda text: prefixes.append(text)
             CBT.llm_complete_task = fake_cbt_complete_task
+            CBT.stage0_prompter = fake_stage0_prompter
             CBT.recap_stage3_challenge = lambda *_args: "You challenged the thought by naming another possibility."
             CBT.run_cbt(updated)
         finally:
@@ -155,11 +168,13 @@ class MockEndToEndFlowTest(unittest.TestCase):
             questioner.log_question = originals["questioner.log_question"]
             questioner.rv_guide = originals["questioner.rv_guide"]
             questioner.rv_validation = originals["questioner.rv_validation"]
+            questioner.reflective_summarizer = originals["questioner.reflective_summarizer"]
             CBT.get_resp_log = originals["CBT.get_resp_log"]
             CBT.log_question = originals["CBT.log_question"]
             CBT.log_system_message = originals["CBT.log_system_message"]
             CBT.set_question_prefix = originals["CBT.set_question_prefix"]
             CBT.llm_complete_task = originals["CBT.llm_complete_task"]
+            CBT.stage0_prompter = originals["CBT.stage0_prompter"]
             CBT.recap_stage3_challenge = originals["CBT.recap_stage3_challenge"]
 
         self.assertEqual(dla_result, [("weight", 2)])
@@ -167,6 +182,15 @@ class MockEndToEndFlowTest(unittest.TestCase):
         self.assertEqual(terminate, 0)
         self.assertIn("Can you tell me more", previous)
         self.assertEqual(question_lib["1"]["1"]["score"], [2])
+        self.assertEqual(len(stage0_histories), 1)
+        self.assertIn(question_text, stage0_histories[0])
+        self.assertIn("My weight increased a lot recently.", stage0_histories[0])
+        self.assertIn("I like painting.", stage0_histories[0])
+        self.assertIn("I often do stress eating during deadlines.", stage0_histories[0])
+        self.assertTrue(any(
+            "Available topics:\n1) Maintaining stable weight" in text
+            for text in logged_questions
+        ))
 
         rv_note = question_lib["1"]["1"]["notes"][-2]
         self.assertIn("rv_decision: 0", rv_note)

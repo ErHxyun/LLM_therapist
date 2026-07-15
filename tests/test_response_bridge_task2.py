@@ -217,5 +217,35 @@ class ResponseBridgeTask2Test(unittest.TestCase):
             response_bridge.classify_dimension_and_score_result = original
 
 
+    def test_exact_yes_no_stop_skip_all_analyzer_calls(self):
+        original_general = response_bridge.classify_general_response_result
+        original_dimension = response_bridge.classify_dimension_and_score_result
+        metrics = {}
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("exact fast path should not call an analyzer")
+
+        try:
+            response_bridge.classify_general_response_result = fail_if_called
+            response_bridge.classify_dimension_and_score_result = fail_if_called
+            self.assertEqual(
+                response_bridge.get_openai_resp("Yes.", "Question?", "sleep", metrics),
+                ("sleep", "Yes"),
+            )
+            self.assertEqual(
+                response_bridge.get_openai_resp("No", "Question?", "sleep", metrics),
+                ("sleep", "No"),
+            )
+            self.assertEqual(
+                response_bridge.get_openai_resp("Stop", "Question?", "sleep", metrics),
+                ("sleep", "Stop"),
+            )
+        finally:
+            response_bridge.classify_general_response_result = original_general
+            response_bridge.classify_dimension_and_score_result = original_dimension
+
+        self.assertEqual(metrics["analyzer_call_count"], 0)
+        self.assertEqual(metrics["source"], "exact_general_fast_path")
+
 if __name__ == "__main__":
     unittest.main()

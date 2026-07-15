@@ -238,6 +238,98 @@ class CBTTask4Test(unittest.TestCase):
         )
         self.assertEqual(events[0]["task"], "cbt_stage3_recap")
 
+    def test_stage0_prompter_returns_cleaned_model_question(self):
+        original = CBT._chat_complete
+        try:
+            CBT._chat_complete = lambda *_args: "QUESTION: Which topic would you like to work on?"
+            generated = CBT.stage0_prompter("screening history")
+            CBT._chat_complete = lambda *_args: ""
+            empty = CBT.stage0_prompter("screening history")
+        finally:
+            CBT._chat_complete = original
+
+        self.assertEqual(generated, "Which topic would you like to work on?")
+        self.assertEqual(empty, "")
+
+    def test_run_cbt_uses_stage0_fallback_for_empty_generation(self):
+        question_lib = {
+            "1": {
+                "1": {
+                    "label": "weight",
+                    "name": "Maintaining stable weight",
+                    "question": ["Have your weight changed significantly recently?"],
+                    "score": [2],
+                    "notes": [],
+                }
+            }
+        }
+        responses = iter([
+            "1",
+            "If I gain weight, I am failing.",
+            "Gaining weight does not mean I am failing.",
+            "I can work on regular meals without judging myself.",
+        ])
+        logged = []
+        originals = {
+            "stage0_prompter": CBT.stage0_prompter,
+            "log_question": CBT.log_question,
+            "log_system_message": CBT.log_system_message,
+            "set_question_prefix": CBT.set_question_prefix,
+            "get_resp_log": CBT.get_resp_log,
+            "stage1_reasoner": CBT.stage1_reasoner,
+            "stage2_reasoner": CBT.stage2_reasoner,
+            "stage3_reasoner": CBT.stage3_reasoner,
+        }
+        try:
+            CBT.stage0_prompter = lambda _history: ""
+            CBT.log_question = lambda text: logged.append(str(text))
+            CBT.log_system_message = lambda text: logged.append(str(text))
+            CBT.set_question_prefix = lambda _text: None
+            CBT.get_resp_log = lambda: next(responses)
+            CBT.stage1_reasoner = lambda *_args, **_kwargs: "DECISION: 0"
+            CBT.stage2_reasoner = lambda *_args, **_kwargs: "DECISION: 0"
+            CBT.stage3_reasoner = lambda *_args, **_kwargs: "DECISION: 0"
+            CBT.run_cbt(question_lib)
+        finally:
+            for name, value in originals.items():
+                setattr(CBT, name, value)
+
+        self.assertIn(
+            "Thank you for answering the questions. Based on your earlier responses",
+            logged[0],
+        )
+
+    def test_stage0_history_and_statement_use_all_rv_responses(self):
+        entry = {
+            "label": "weight",
+            "name": "Maintaining stable weight",
+            "question": [
+                "Have your weight changed significantly recently?",
+                "What have you noticed about your weight lately?",
+            ],
+            "score": [2],
+            "notes": [
+                [
+                    "original_resp: My weight increased recently.",
+                    "followup_resp: I like painting.",
+                    "followup_resp_1: I stress eat during deadlines.",
+                    "rv_validation: That connects to the weight change.",
+                ],
+                ["CBT_stage: old_session"],
+            ],
+        }
+
+        history = CBT.build_cbt_dimension_history(entry)
+        statement = CBT.build_cbt_statement(entry)
+
+        self.assertIn("Have your weight changed significantly recently?", history)
+        self.assertIn("What have you noticed about your weight lately?", history)
+        self.assertIn("My weight increased recently.", history)
+        self.assertIn("I like painting.", history)
+        self.assertIn("I stress eat during deadlines.", history)
+        self.assertNotIn("CBT_stage", history)
+        self.assertEqual(statement, "My weight increased recently. I like painting. I stress eat during deadlines.")
+
 
 if __name__ == "__main__":
     unittest.main()
