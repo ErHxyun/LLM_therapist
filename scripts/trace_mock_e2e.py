@@ -80,7 +80,6 @@ def main() -> int:
         "questioner.log_question": questioner.log_question,
         "questioner.rv_guide": questioner.rv_guide,
         "questioner.rv_validation": questioner.rv_validation,
-        "questioner.set_question_prefix": questioner.set_question_prefix,
         "CBT.get_resp_log": CBT.get_resp_log,
         "CBT.log_question": CBT.log_question,
         "CBT.set_question_prefix": CBT.set_question_prefix,
@@ -121,7 +120,6 @@ def main() -> int:
             questioner.log_question = lambda text: ai_outputs.append(text)
             questioner.rv_guide = lambda *_args: "Guide: Thank you for sharing that. I want to return to what you mentioned earlier: \"My weight increased a lot recently.\" Could you tell me more about that?"
             questioner.rv_validation = lambda *_args: "VALIDATION: You mentioned stress eating during deadlines, and that connects to the weight change you shared earlier. I appreciate you explaining that connection."
-            questioner.set_question_prefix = lambda text: prefixes.append(text)
 
             CBT.get_resp_log = lambda: next(cbt_responses)
             CBT.log_question = lambda text: ai_outputs.append(text)
@@ -155,7 +153,7 @@ def main() -> int:
             print(f"[R-V Guide] {ai_outputs[1]}")
             print("[User] I often do stress eating during deadlines.")
             print(f"[R-V Reasoner] DECISION: 0")
-            print(f"[R-V Validator queued] {prefixes[0] if prefixes else ''}")
+            print(f"[R-V Validator queued] {questioner._PENDING_VALIDATION_TEXT}")
 
             print("\n=== CBT ===")
             CBT.run_cbt(updated)
@@ -184,7 +182,6 @@ def main() -> int:
             questioner.log_question = originals["questioner.log_question"]
             questioner.rv_guide = originals["questioner.rv_guide"]
             questioner.rv_validation = originals["questioner.rv_validation"]
-            questioner.set_question_prefix = originals["questioner.set_question_prefix"]
             CBT.get_resp_log = originals["CBT.get_resp_log"]
             CBT.log_question = originals["CBT.log_question"]
             CBT.set_question_prefix = originals["CBT.set_question_prefix"]

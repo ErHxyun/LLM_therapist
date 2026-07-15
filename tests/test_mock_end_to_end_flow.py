@@ -15,6 +15,8 @@ class MockEndToEndFlowTest(unittest.TestCase):
         self.db_path = os.path.join(self.tmp.name, "events.sqlite3")
         self.old_db_path = os.environ.get("CAITI_STRUCTURED_LOG_DB")
         self.old_session_id = os.environ.get("CAITI_SESSION_ID")
+        self.old_pending_validation = questioner._PENDING_VALIDATION_TEXT
+        self.old_pending_intro = questioner._PENDING_NEXT_QUESTION_INTRO
         os.environ["CAITI_STRUCTURED_LOG_DB"] = self.db_path
         os.environ["CAITI_SESSION_ID"] = "mock-e2e-session"
 
@@ -27,6 +29,8 @@ class MockEndToEndFlowTest(unittest.TestCase):
             os.environ.pop("CAITI_SESSION_ID", None)
         else:
             os.environ["CAITI_SESSION_ID"] = self.old_session_id
+        questioner._PENDING_VALIDATION_TEXT = self.old_pending_validation
+        questioner._PENDING_NEXT_QUESTION_INTRO = self.old_pending_intro
         self.tmp.cleanup()
 
     def _events(self):
@@ -82,7 +86,6 @@ class MockEndToEndFlowTest(unittest.TestCase):
             "questioner.log_question": questioner.log_question,
             "questioner.rv_guide": questioner.rv_guide,
             "questioner.rv_validation": questioner.rv_validation,
-            "questioner.set_question_prefix": questioner.set_question_prefix,
             "CBT.get_resp_log": CBT.get_resp_log,
             "CBT.log_question": CBT.log_question,
             "CBT.log_system_message": CBT.log_system_message,
@@ -118,7 +121,6 @@ class MockEndToEndFlowTest(unittest.TestCase):
             questioner.log_question = lambda text: logged_questions.append(text)
             questioner.rv_guide = lambda *_args: "Guide: Please return to the weight change."
             questioner.rv_validation = lambda *_args: "VALIDATION: That connects to the weight change."
-            questioner.set_question_prefix = lambda text: prefixes.append(text)
 
             dla_result = questioner.classify_segments(user_segments, question_text, "weight")
             valid, terminate, previous, updated = questioner.evaluate_result(
@@ -128,6 +130,10 @@ class MockEndToEndFlowTest(unittest.TestCase):
                 "1",
                 user_segments,
                 question_text,
+            )
+            self.assertEqual(
+                questioner._PENDING_VALIDATION_TEXT,
+                "VALIDATION: That connects to the weight change.",
             )
 
             CBT.get_resp_log = lambda: next(cbt_responses)
@@ -149,7 +155,6 @@ class MockEndToEndFlowTest(unittest.TestCase):
             questioner.log_question = originals["questioner.log_question"]
             questioner.rv_guide = originals["questioner.rv_guide"]
             questioner.rv_validation = originals["questioner.rv_validation"]
-            questioner.set_question_prefix = originals["questioner.set_question_prefix"]
             CBT.get_resp_log = originals["CBT.get_resp_log"]
             CBT.log_question = originals["CBT.log_question"]
             CBT.log_system_message = originals["CBT.log_system_message"]
