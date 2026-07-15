@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.utils.config_loader import DATA_DIR
+from src.utils import config_loader
 from src.utils.session_event_logger import get_event_db_path, get_session_id
 
 _DB_LOCK = threading.Lock()
@@ -43,7 +43,7 @@ class IntermissionScreeningStore:
 
     @property
     def results_json_path(self) -> str:
-        return self.json_path or os.path.join(DATA_DIR, _DEFAULT_JSON_FILENAME)
+        return self.json_path or os.path.join(config_loader.DATA_DIR, _DEFAULT_JSON_FILENAME)
 
     @property
     def current_session_id(self) -> str:

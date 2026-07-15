@@ -22,6 +22,7 @@ def emotion_record(
     comparison=None,
     audio_scores=None,
     quality_flags=None,
+    risk_level="Moderate",
 ):
     return {
         "status": "ok",
@@ -40,7 +41,7 @@ def emotion_record(
             },
             "final_result": {
                 "credibility_risk": risk,
-                "risk_level": "Moderate",
+                "risk_level": risk_level,
             },
         },
     }
@@ -53,7 +54,7 @@ class EmotionFollowupTest(unittest.TestCase):
             enabled=True,
             wait_timeout_sec=0.0,
             min_confidence=50,
-            risk_threshold=60,
+            risk_threshold=55,
             light_risk_threshold=45,
         )
 
@@ -109,6 +110,17 @@ class EmotionFollowupTest(unittest.TestCase):
         self.assertFalse(decision.should_follow_up)
         self.assertEqual(decision.reason, "emotion_consistent_or_low_risk")
 
+    def test_score_zero_borderline_distressed_mismatch_triggers_followup(self):
+        decision = assess_emotion_followup(
+            score=0,
+            user_text="I'm fine.",
+            record=emotion_record(risk=55),
+            settings=self.settings,
+        )
+
+        self.assertTrue(decision.should_follow_up)
+        self.assertEqual(decision.reason, "emotion_distress_hidden_by_low_content_score")
+
     def test_light_mismatch_low_risk_does_not_trigger_followup(self):
         decision = assess_emotion_followup(
             score=0,
@@ -150,6 +162,48 @@ class EmotionFollowupTest(unittest.TestCase):
         self.assertTrue(decision.should_follow_up)
         self.assertEqual(decision.reason, "emotion_positive_tone_with_high_content_score")
         self.assertIn("lighter tone", decision.followup_text)
+
+    def test_score_two_moderate_level_triggers_meaning_check_followup(self):
+        decision = assess_emotion_followup(
+            score=2,
+            user_text="All my friends hate me.",
+            record=emotion_record(
+                transcript="All my friends hate me.",
+                risk=51,
+                risk_level="Moderate",
+                audio_emotion=[-1, -1],
+                context_emotion=[-1, -1],
+                comparison={
+                    "audio_vs_context_consistent": True,
+                    "contradiction_or_sarcasm": False,
+                },
+                audio_scores={"arousal": 39, "tension": 54, "hesitation": 50, "stability": 52},
+            ),
+            settings=self.settings,
+        )
+
+        self.assertTrue(decision.should_follow_up)
+        self.assertEqual(decision.reason, "emotion_moderate_risk_with_high_content_score")
+        self.assertIn("capture it fairly well", decision.followup_text)
+
+    def test_score_two_low_level_low_risk_uses_regular_reflection(self):
+        decision = assess_emotion_followup(
+            score=2,
+            user_text="All my friends hate me.",
+            record=emotion_record(
+                transcript="All my friends hate me.",
+                risk=40,
+                risk_level="Low",
+                audio_emotion=[-1, -1],
+                context_emotion=[-1, -1],
+                comparison={"audio_vs_context_consistent": True},
+                audio_scores={"arousal": 39, "tension": 54, "hesitation": 50, "stability": 52},
+            ),
+            settings=self.settings,
+        )
+
+        self.assertFalse(decision.should_follow_up)
+        self.assertEqual(decision.reason, "emotion_consistent_or_low_risk")
 
     def test_unreliable_result_does_not_trigger_followup(self):
         decision = assess_emotion_followup(

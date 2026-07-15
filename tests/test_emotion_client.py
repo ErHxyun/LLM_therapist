@@ -4,7 +4,12 @@ import unittest
 import wave
 from pathlib import Path
 
-from src.emotion.client import EmotionSettings, EmotionSideChannel, NullEmotionSideChannel
+from src.emotion.client import (
+    EmotionSettings,
+    EmotionSideChannel,
+    NullEmotionSideChannel,
+    _emotion_log_summary,
+)
 
 
 class EmotionClientTests(unittest.TestCase):
@@ -71,6 +76,34 @@ class EmotionClientTests(unittest.TestCase):
             persisted = json.loads(lines[0])
             self.assertEqual(persisted["status"], "ok")
             self.assertEqual(persisted["response"]["final_result"]["risk_level"], "low")
+
+    def test_emotion_log_summary_includes_demo_scores(self):
+        summary = _emotion_log_summary(
+            {
+                "audio_emotion": [0, -1],
+                "context_emotion": [0, 1],
+                "audio_scores": {"arousal": 55, "tension": 45, "stability": 60},
+                "text_scores": {"text_valence": 40, "certainty": 70},
+                "emotion_comparison": {
+                    "audio_vs_context_consistent": False,
+                    "arousal_conflict": True,
+                    "valence_conflict": False,
+                    "contradiction_or_sarcasm": True,
+                },
+                "final_assessment": {"confidence": 80, "uncertainty": 20},
+                "final_result": {"credibility_risk": 62, "risk_level": "Moderate"},
+            }
+        )
+
+        self.assertEqual(summary["risk"], 62)
+        self.assertEqual(summary["risk_level"], "Moderate")
+        self.assertEqual(summary["confidence"], 80)
+        self.assertEqual(summary["audio_emotion"], [0, -1])
+        self.assertEqual(summary["context_emotion"], [0, 1])
+        self.assertFalse(summary["consistent"])
+        self.assertTrue(summary["arousal_conflict"])
+        self.assertEqual(summary["audio_arousal"], 55)
+        self.assertEqual(summary["text_valence"], 40)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from src.emotion.client import EmotionSideChannel, NullEmotionSideChannel, build
 from src.emotion.followup import (
     assess_emotion_followup,
     build_emotion_followup_settings,
+    clear_emotion_session_state,
     clear_emotion_results_for_tests,
     pop_late_emotion_followup,
     queue_late_emotion_followup_request,
@@ -17,6 +18,7 @@ __all__ = [
     "build_emotion_side_channel",
     "assess_emotion_followup",
     "build_emotion_followup_settings",
+    "clear_emotion_session_state",
     "clear_emotion_results_for_tests",
     "pop_late_emotion_followup",
     "queue_late_emotion_followup_request",

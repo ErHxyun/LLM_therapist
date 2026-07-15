@@ -23,12 +23,14 @@ from src.intermission.tasks import (
     classify_screening_response,
 )
 from src.intermission.storage import IntermissionScreeningStore, build_intermission_store
+from src.runtime.status_monitor import get_active_status_monitor
 from src.utils import config_loader
 from src.utils.log_util import get_logger
 from src.voice.backends import TTSBackend
 from src.voice.tts import TTSRouteSettings, build_tts_from_settings
 
 logger = get_logger("IntermissionRunner")
+AUDIO_RELEASE_SETTLE_SEC = 0.15
 
 
 @dataclass(frozen=True)
@@ -51,9 +53,9 @@ class IntermissionSettings:
     db_path: str = ""
     results_json_path: str = ""
     lead_in_text: str = (
-        "Caiti needs a little time to think. While we wait, let's do a brief check-in."
+        "Let's do a brief check-in together."
     )
-    bridge_text: str = "Caiti is ready now. Let's come back to the main questions."
+    bridge_text: str = "Let's go back to the main session."
     transition_delay_sec: float = 2.0
 
 
@@ -112,7 +114,7 @@ class IntermissionRunner:
                 screening_count += 1
                 self._run_screening_item(activity)
             else:
-                self._speak(activity.text)
+                self._run_scripted_task(activity, deadline, is_ready, should_stop)
 
         if did_activity and is_ready() and not self._should_stop(should_stop):
             self._sleep_before_bridge(should_stop)
@@ -206,7 +208,7 @@ class IntermissionRunner:
         return task
 
     def _run_screening_item(self, item: ScreeningItem) -> None:
-        self._speak(item.prompt)
+        self._speak(item.prompt, source="intermission_screening", expects_response=True)
         if self.stt is None:
             self._screening_answers[item.item_id] = None
             self._persist_screening_result(
@@ -244,6 +246,25 @@ class IntermissionRunner:
         )
         self._speak("Thank you.")
 
+    def _run_scripted_task(
+        self,
+        task: ScriptedTask,
+        deadline: float,
+        is_ready: Callable[[], bool],
+        should_stop: Callable[[], bool] | None,
+    ) -> None:
+        source = f"intermission_{task.kind.value}"
+        for step in task.iter_steps():
+            if time.monotonic() >= deadline or is_ready() or self._should_stop(should_stop):
+                return
+            self._speak(step.text, source=source)
+            self._sleep_between_scripted_steps(
+                step.pause_after_sec,
+                deadline,
+                is_ready,
+                should_stop,
+            )
+
     def _persist_screening_result(
         self,
         item: ScreeningItem,
@@ -265,13 +286,19 @@ class IntermissionRunner:
                 reason=reason,
             )
             self.store.upsert_summary(self.screening_totals)
+            monitor = get_active_status_monitor()
+            if monitor is not None:
+                setter = getattr(monitor, "set_intermission_state", None)
+                if callable(setter):
+                    setter(summary=self.store.fetch_summary(), items=self.store.fetch_items())
         except Exception as exc:
             logger.warning("Failed to persist private intermission screening result %s: %s", item.item_id, exc)
 
-    def _speak(self, text: str) -> None:
+    def _speak(self, text: str, source: str = "intermission", expects_response: bool = False) -> None:
         chunk = str(text or "").strip()
         if not chunk:
             return
+        self._publish_prompt(chunk, source=source, expects_response=expects_response)
         set_playback_status_hook = getattr(self.tts, "set_playback_status_hook", None)
         playback_status_hook_installed = callable(set_playback_status_hook)
         led_active = False
@@ -281,7 +308,7 @@ class IntermissionRunner:
             led_active = bool(active)
             self._set_tts_active(led_active)
 
-        self._duck_music()
+        self._suspend_music_for_spoken_audio()
         try:
             if playback_status_hook_installed:
                 set_playback_status_hook(set_tts_active)
@@ -293,7 +320,39 @@ class IntermissionRunner:
                 set_playback_status_hook(None)
             if led_active:
                 self._set_tts_active(False)
+            self._resume_music_after_spoken_audio()
+
+    def _music_is_background(self) -> bool:
+        method = getattr(self.music, "is_background", None)
+        if not callable(method):
+            return False
+        try:
+            return bool(method())
+        except Exception as exc:
+            logger.warning("Intermission music background-state check failed: %s", exc)
+            return False
+
+    def _suspend_music_for_spoken_audio(self) -> None:
+        if self.music is None:
+            return
+        if self._music_is_background():
+            stop_method = getattr(self.music, "stop", None)
+            if callable(stop_method):
+                stop_method()
+                time.sleep(AUDIO_RELEASE_SETTLE_SEC)
+                return
+        self._duck_music()
+
+    def _resume_music_after_spoken_audio(self) -> None:
+        if self.music is None:
+            return
+        if self._music_is_background():
+            start_method = getattr(self.music, "start", None)
+            if callable(start_method):
+                start_method()
             self._restore_music()
+            return
+        self._restore_music()
 
     def _duck_music(self) -> None:
         method = getattr(self.music, "duck", None)
@@ -323,6 +382,22 @@ class IntermissionRunner:
         except Exception as exc:
             logger.warning("Intermission STT LED hook failed: %s", exc)
 
+    def _publish_prompt(self, text: str, *, source: str, expects_response: bool) -> None:
+        monitor = get_active_status_monitor()
+        if monitor is None:
+            return
+        setter = getattr(monitor, "set_prompt", None)
+        if not callable(setter):
+            return
+        try:
+            setter(
+                text=str(text or ""),
+                source=source,
+                expects_response=bool(expects_response),
+            )
+        except Exception:
+            return
+
     def _sleep_until_ready(
         self,
         deadline: float,
@@ -339,6 +414,25 @@ class IntermissionRunner:
         deadline = time.monotonic() + delay
         while time.monotonic() < deadline and not self._should_stop(should_stop):
             time.sleep(min(max(0.01, self.settings.poll_interval_sec), deadline - time.monotonic()))
+
+    def _sleep_between_scripted_steps(
+        self,
+        delay: float,
+        deadline: float,
+        is_ready: Callable[[], bool],
+        should_stop: Callable[[], bool] | None,
+    ) -> None:
+        remaining = max(0.0, min(float(delay), max(0.0, deadline - time.monotonic())))
+        while remaining > 0 and not is_ready() and not self._should_stop(should_stop):
+            interval = min(
+                remaining,
+                max(0.01, self.settings.poll_interval_sec),
+                max(0.0, deadline - time.monotonic()),
+            )
+            if interval <= 0:
+                return
+            time.sleep(interval)
+            remaining = max(0.0, remaining - interval)
 
     @staticmethod
     def _should_stop(should_stop: Callable[[], bool] | None) -> bool:

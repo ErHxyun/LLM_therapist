@@ -11,6 +11,7 @@ from typing import Any, Callable
 from urllib import error, request
 
 from src.emotion.followup import register_emotion_result
+from src.runtime.status_monitor import get_active_status_monitor
 from src.utils import config_loader
 from src.utils.log_util import get_logger
 
@@ -137,7 +138,12 @@ class EmotionSideChannel:
                 "request": payload,
                 "response": response,
             }
-            logger.info("Emotion analysis completed for utterance_id=%s.", utterance_id)
+            logger.info(
+                "Emotion scores utterance_id=%s latency=%.3fs %s",
+                utterance_id,
+                record["latency_sec"],
+                json.dumps(_emotion_log_summary(response), ensure_ascii=False, sort_keys=True),
+            )
         except Exception as exc:
             record = {
                 "status": "error",
@@ -157,6 +163,14 @@ class EmotionSideChannel:
 
         self._append_result(record)
         register_emotion_result(record)
+        monitor = get_active_status_monitor()
+        if monitor is not None:
+            setter = getattr(monitor, "set_emotion_result", None)
+            if callable(setter):
+                try:
+                    setter(record)
+                except Exception:
+                    pass
         return record
 
     def _utterance_id(self) -> str:
@@ -178,6 +192,31 @@ class EmotionSideChannel:
         with self._write_lock:
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+
+
+def _emotion_log_summary(response: dict[str, Any]) -> dict[str, Any]:
+    final_assessment = response.get("final_assessment", {})
+    final_result = response.get("final_result", {})
+    comparison = response.get("emotion_comparison", {})
+    audio_scores = response.get("audio_scores", {})
+    text_scores = response.get("text_scores", {})
+    return {
+        "risk": final_result.get("credibility_risk", final_assessment.get("credibility_risk")),
+        "risk_level": final_result.get("risk_level", final_assessment.get("risk_level")),
+        "confidence": final_assessment.get("confidence"),
+        "uncertainty": final_assessment.get("uncertainty"),
+        "audio_emotion": response.get("audio_emotion"),
+        "context_emotion": response.get("context_emotion"),
+        "consistent": comparison.get("audio_vs_context_consistent"),
+        "arousal_conflict": comparison.get("arousal_conflict"),
+        "valence_conflict": comparison.get("valence_conflict"),
+        "contradiction_or_sarcasm": comparison.get("contradiction_or_sarcasm"),
+        "audio_arousal": audio_scores.get("arousal"),
+        "audio_tension": audio_scores.get("tension"),
+        "audio_stability": audio_scores.get("stability"),
+        "text_valence": text_scores.get("text_valence"),
+        "certainty": text_scores.get("certainty"),
+    }
 
 
 def post_json(url: str, payload: dict[str, Any], timeout_sec: float) -> dict[str, Any]:

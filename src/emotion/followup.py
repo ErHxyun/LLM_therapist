@@ -102,11 +102,15 @@ def wait_for_emotion_result(transcript: str, timeout_sec: float) -> dict[str, An
             _condition.wait(timeout=remaining)
 
 
-def clear_emotion_results_for_tests() -> None:
+def clear_emotion_session_state() -> None:
     with _condition:
         _recent_results.clear()
         _pending_late_followups.clear()
         _queued_late_followups.clear()
+
+
+def clear_emotion_results_for_tests() -> None:
+    clear_emotion_session_state()
 
 
 def queue_late_emotion_followup_request(
@@ -178,6 +182,7 @@ def assess_emotion_followup(
 
     mismatch = bool(metadata["comparison_mismatch"])
     risk = int(metadata["credibility_risk"])
+    moderate_or_high_risk = _moderate_or_high_risk(metadata, settings)
     audio_valence = metadata["audio_valence"]
     audio_scores = metadata["audio_scores"]
     distressed_voice = _distressed_voice(audio_valence, audio_scores)
@@ -208,6 +213,15 @@ def assess_emotion_followup(
             True,
             "emotion_positive_tone_with_high_content_score",
             "You described something pretty difficult, and I want to gently check whether the lighter tone means it feels manageable now, or if it is still weighing on you.",
+            metadata,
+        )
+
+    if score >= 2 and moderate_or_high_risk:
+        metadata["rule"] = "score_2_moderate_emotion_risk"
+        return EmotionFollowupDecision(
+            True,
+            "emotion_moderate_risk_with_high_content_score",
+            "You described something pretty difficult, and I want to make sure I am hearing it the way you mean it. Does that capture it fairly well, or is there a bit more weight to it than came through just now?",
             metadata,
         )
 
@@ -374,6 +388,14 @@ def _strong_distressed_voice(audio_valence: int | None, audio_scores: dict[str, 
 
 def _positive_voice(audio_valence: int | None) -> bool:
     return audio_valence is not None and audio_valence > 0
+
+
+def _moderate_or_high_risk(metadata: dict[str, Any], settings: EmotionFollowupSettings) -> bool:
+    risk = int(metadata["credibility_risk"])
+    if risk >= settings.risk_threshold:
+        return True
+    risk_level = str(metadata.get("risk_level", "")).strip().lower()
+    return risk >= settings.light_risk_threshold and risk_level in {"moderate", "high", "severe"}
 
 
 def _int_value(value: Any, default: int | None) -> int | None:
