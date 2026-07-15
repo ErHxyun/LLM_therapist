@@ -4,6 +4,7 @@ import time
 import threading
 import pandas as pd
 from pandas.errors import EmptyDataError
+from src.runtime.status_monitor import get_active_status_monitor
 from src.utils.config_loader import RECORD_CSV
 
 # Set up logger for this module
@@ -18,6 +19,32 @@ RECORD_LOCK = threading.RLock()
 # When non-empty, its content will be combined with the next question
 # using two newline characters as the separator, then cleared.
 _PENDING_QUESTION_PREFIX = ""
+
+
+def _publish_prompt_status(text: str, expects_response: bool) -> None:
+    monitor = get_active_status_monitor()
+    if monitor is None:
+        return
+    method = getattr(monitor, "set_prompt", None)
+    if not callable(method):
+        return
+    try:
+        method(text=str(text or ""), source="record", expects_response=bool(expects_response))
+    except Exception:
+        return
+
+
+def _publish_response_status(text: str, source: str = "record") -> None:
+    monitor = get_active_status_monitor()
+    if monitor is None:
+        return
+    method = getattr(monitor, "set_response", None)
+    if not callable(method):
+        return
+    try:
+        method(text=str(text or ""), source=source)
+    except Exception:
+        return
 
 def set_question_prefix(text: str):
     """
@@ -85,6 +112,7 @@ def _log_question_record(text: str, expects_response: bool):
                 # Clear the prefix once consumed
                 _PENDING_QUESTION_PREFIX = ""
                 logger.info(f"Prompted question: {combined}")
+                _publish_prompt_status(combined, expects_response)
                 break
 
 
@@ -108,6 +136,7 @@ def get_answer(should_stop=None):
                 user_input = data.loc[0, "Resp"]
                 data.loc[0, "Resp_Lock"] = 1
                 _write(data)
+                _publish_response_status(user_input)
                 break
     user_input = str(user_input)
     user_input = user_input.replace(", and", ".").replace("but", ".")
@@ -134,6 +163,7 @@ def get_resp_log(should_stop=None):
                 data.loc[0, "Resp_Lock"] = 1
                 _write(data)
                 logger.info(f"Received user response: {user_response}")
+                _publish_response_status(user_response)
                 break
     return user_response
 
@@ -148,3 +178,18 @@ def init_record():
         data.loc[0, 'Question_Lock'] = 0
         data.loc[0, 'Resp_Lock'] = 1
         _write(data)
+
+
+def reset_record_state():
+    global _PENDING_QUESTION_PREFIX
+    with RECORD_LOCK:
+        try:
+            data = _read()
+        except FileNotFoundError:
+            data = pd.DataFrame([["", 0, "", 1]], columns=HEADER)
+        data.loc[0, "Question"] = ""
+        data.loc[0, "Question_Lock"] = 0
+        data.loc[0, "Resp"] = ""
+        data.loc[0, "Resp_Lock"] = 1
+        _write(data)
+        _PENDING_QUESTION_PREFIX = ""

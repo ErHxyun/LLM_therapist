@@ -74,9 +74,6 @@ class SessionControl:
             return "start"
 
         with self._lock:
-            if self._awaiting_shutdown_confirmation:
-                logger.info("Ignoring short press while waiting for shutdown confirmation.")
-                return "ignored_shutdown_confirmation"
             if self._paused:
                 self._paused = False
                 self._pause_requested = False
@@ -86,6 +83,13 @@ class SessionControl:
                 self._publish_button_event("resume")
                 logger.info("Session resume requested by button.")
                 return "resume"
+            if self._phase in {"preloading", "loading", "cleanup"}:
+                logger.info("Ignoring short press during busy phase: %s", self._phase)
+                self._publish_button_event(f"ignored:{self._phase}")
+                return "ignored_busy"
+            if self._awaiting_shutdown_confirmation:
+                logger.info("Ignoring short press while waiting for shutdown confirmation.")
+                return "ignored_shutdown_confirmation"
             self._pause_requested = True
             self._paused = True
             self._phase_before_pause = self._phase
@@ -101,6 +105,10 @@ class SessionControl:
                 logger.info("Ignoring long press before session start.")
                 self._publish_button_event("long_press_before_start")
                 return "long_press_before_start"
+            if self._phase in {"preloading", "loading", "cleanup"}:
+                logger.info("Ignoring long press during busy phase: %s", self._phase)
+                self._publish_button_event(f"ignored:{self._phase}")
+                return "ignored_busy"
             if self._awaiting_shutdown_confirmation or self._shutdown_confirm_requested:
                 self._publish_button_event("shutdown_confirmed_by_long_press")
                 self._request_shutdown_locked("second long press")
@@ -144,6 +152,26 @@ class SessionControl:
     def mark_closing(self) -> None:
         with self._lock:
             self._set_phase_locked("closing")
+
+    def set_phase(self, phase: str) -> None:
+        with self._lock:
+            self._set_phase_locked(str(phase or "").strip() or "unknown")
+
+    def reset_for_next_session(self) -> None:
+        with self._lock:
+            self._started = False
+            self._started_event.clear()
+            self._resume_event.set()
+            self._shutdown_event.clear()
+            self._phase = "waiting_start"
+            self._pause_requested = False
+            self._paused = False
+            self._phase_before_pause = "waiting_start"
+            self._skip_to_cbt_requested = False
+            self._shutdown_confirm_requested = False
+            self._awaiting_shutdown_confirmation = False
+            self._phase_before_confirmation = "waiting_start"
+            self._set_phase_locked("waiting_start")
 
     def checkpoint(self, location: str) -> str:
         """Honor pending button events at a safe workflow boundary.
@@ -417,6 +445,12 @@ class NullSessionControl:
         return
 
     def mark_closing(self) -> None:
+        return
+
+    def set_phase(self, phase: str) -> None:
+        return
+
+    def reset_for_next_session(self) -> None:
         return
 
     def checkpoint(self, location: str) -> str:

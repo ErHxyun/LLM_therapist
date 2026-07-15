@@ -127,6 +127,35 @@ class HandlerRL:
         
         logger.info("RL handler setup complete.")
 
+    def _item_is_answered(self, item_index: int) -> bool:
+        entry = self.question_lib.get(str(item_index), {}).get("1", {})
+        scores = entry.get("score", [])
+        return bool(scores)
+
+    def _build_item_mask(self, dimension_count: int) -> list[int]:
+        # START and END are never askable screening actions.
+        mask = [0]
+        answered = 0
+        remaining = 0
+        for item_index in range(1, dimension_count + 1):
+            if self._item_is_answered(item_index):
+                mask.append(0)
+                answered += 1
+            else:
+                mask.append(1)
+                remaining += 1
+        mask.append(0)
+        logger.info(
+            "Prepared screening restart mask from saved question library: answered=%s remaining=%s",
+            answered,
+            remaining,
+        )
+        return mask
+
+    def _persist_runtime_question_lib(self) -> None:
+        save_question_lib(QUESTION_LIB_FILENAME, self.question_lib)
+        logger.info("Persisted runtime question library to %s.", QUESTION_LIB_FILENAME)
+
     def run(self):
         """
         Main RL loop for the entire screening process.
@@ -144,7 +173,8 @@ class HandlerRL:
         is_terminated = False
         dimension_count = len(self.question_lib)
         # Mask for available actions: START and END are states, not screening dimensions to ask.
-        item_mask = [0] + [1] * dimension_count + [0]
+        # On restart/resume, any dimension with a saved score is treated as already completed.
+        item_mask = self._build_item_mask(dimension_count)
         while not is_terminated:
             control_action = self.session_control.checkpoint("screening")
             if control_action == "skip_to_cbt":
@@ -172,6 +202,7 @@ class HandlerRL:
                 turn_records=self.new_response,
                 session_control=self.session_control,
             )
+            self._persist_runtime_question_lib()
             action_turn_records = self.new_response[turn_start:]
             primary_turn = action_turn_records[-1] if action_turn_records else {}
             self.last_question = last_question_updated
@@ -267,6 +298,7 @@ class HandlerRL:
         self.session_control.mark_cbt()
         run_cbt(self.question_lib, session_control=self.session_control)
         logger.info("Completed CBT flow.")
+        self._persist_runtime_question_lib()
         # Persist question_lib again to capture CBT notes
         save_filename = QUESTION_LIB_FILENAME.replace(".json", f"_{int(time.time())}.json")
         save_question_lib(save_filename, self.question_lib)

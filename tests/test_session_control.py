@@ -29,17 +29,14 @@ class SessionControlTests(unittest.TestCase):
         self.assertFalse(session.should_interrupt_workflow_wait())
         self.assertFalse(session.should_keep_music_on_interrupted_voice_turn())
 
-    def test_long_press_during_loading_requests_shutdown_confirmation_not_cbt(self):
+    def test_long_press_during_loading_is_ignored(self):
         session = SessionControl(SessionControlSettings(enabled=True))
         session.request_start("test")
 
-        self.assertEqual(session.handle_long_press(), "shutdown_confirmation")
-
-        self.assertTrue(session.should_interrupt_voice())
+        self.assertEqual(session.handle_long_press(), "ignored_busy")
+        self.assertFalse(session.should_interrupt_voice())
         self.assertFalse(session.should_interrupt_workflow_wait())
         self.assertFalse(session.should_discard_interrupted_voice_turn())
-        self.assertTrue(session.begin_shutdown_confirmation())
-        self.assertEqual(session.handle_shutdown_confirmation_response("no"), "cancelled")
 
     def test_session_control_publishes_monitor_phase_and_button_events(self):
         events = []
@@ -87,6 +84,43 @@ class SessionControlTests(unittest.TestCase):
         self.assertFalse(session.is_paused())
         self.assertIn(("phase", "screening"), events)
         self.assertIn(("button", "resume"), events)
+
+    def test_short_press_resumes_even_when_paused_from_loading_phase(self):
+        session = SessionControl(SessionControlSettings(enabled=True))
+        session.request_start("test")
+        session.set_phase("user_intake")
+        session.handle_short_press()
+        session.set_phase("loading")
+
+        self.assertTrue(session.is_paused())
+        self.assertEqual(session.handle_short_press(), "resume")
+        self.assertFalse(session.is_paused())
+
+    def test_busy_phase_ignores_short_and_long_presses(self):
+        session = SessionControl(SessionControlSettings(enabled=True))
+        session.request_start("test")
+        session.set_phase("loading")
+
+        self.assertEqual(session.handle_short_press(), "ignored_busy")
+        self.assertEqual(session.handle_long_press(), "ignored_busy")
+        self.assertFalse(session.is_paused())
+        self.assertFalse(session.should_interrupt_voice())
+
+    def test_reset_for_next_session_clears_started_pause_and_skip_state(self):
+        session = SessionControl(SessionControlSettings(enabled=True))
+        session.request_start("test")
+        session.mark_screening()
+        session.handle_short_press()
+        session.handle_long_press()
+
+        session.reset_for_next_session()
+
+        self.assertFalse(session.is_paused())
+        self.assertFalse(session.should_interrupt_voice())
+        self.assertFalse(session.is_shutdown_requested())
+        self.assertEqual(session.checkpoint("screening"), "continue")
+        self.assertEqual(session.handle_short_press(), "start")
+        self.assertTrue(session.wait_for_start(poll_interval_sec=0.01))
 
     def test_long_press_in_cbt_asks_voice_confirmation_and_closes_on_yes(self):
         events = []

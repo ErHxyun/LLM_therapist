@@ -17,6 +17,7 @@ if not os.path.exists(LOG_DIR):
     
 _GLOBAL_LOG_FILE = os.environ.get("LOG_FILE")  # 可通过入口统一指定
 _GLOBAL_FILE_HANDLER = None
+_SESSION_FILE_HANDLER = None
 
 def _ensure_global_file_handler():
     '''
@@ -74,4 +75,38 @@ def get_logger(name, file=None, file_handler=None):
 
     return logger
 
+
+def set_session_log_file(path: str) -> str:
+    """Attach a process-wide session log file without disturbing existing handlers."""
+    global _SESSION_FILE_HANDLER
+    target = os.path.abspath(str(path or "").strip())
+    if not target:
+        raise ValueError("Session log path must be non-empty.")
+
+    folder = os.path.dirname(target)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    existing_target = getattr(_SESSION_FILE_HANDLER, "baseFilename", None)
+    if existing_target == target:
+        return target
+
+    if _SESSION_FILE_HANDLER is not None:
+        root_logger = logging.getLogger()
+        if _SESSION_FILE_HANDLER in root_logger.handlers:
+            root_logger.removeHandler(_SESSION_FILE_HANDLER)
+        try:
+            _SESSION_FILE_HANDLER.close()
+        except Exception:
+            pass
+        _SESSION_FILE_HANDLER = None
+
+    handler = logging.FileHandler(target)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s - %(message)s'))
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(handler)
+    _SESSION_FILE_HANDLER = handler
+    return target
 

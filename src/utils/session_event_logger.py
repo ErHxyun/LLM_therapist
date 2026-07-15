@@ -15,14 +15,33 @@ from src.local_llm.types import LLMTask
 from src.utils.config_loader import LOG_DIR, SUBJECT_ID
 
 _DB_LOCK = threading.Lock()
+_SESSION_ID_LOCK = threading.Lock()
 _SESSION_ID = os.environ.get(
     "CAITI_SESSION_ID",
     f"{SUBJECT_ID}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
 )
 
 
+def build_session_id(subject_id: str | None = None) -> str:
+    subject = str(subject_id or SUBJECT_ID).strip() or SUBJECT_ID
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{subject}_{timestamp}"
+
+
 def get_session_id() -> str:
-    return os.environ.get("CAITI_SESSION_ID", _SESSION_ID)
+    with _SESSION_ID_LOCK:
+        return os.environ.get("CAITI_SESSION_ID", _SESSION_ID)
+
+
+def set_session_id(session_id: str) -> str:
+    global _SESSION_ID
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        normalized = build_session_id()
+    with _SESSION_ID_LOCK:
+        _SESSION_ID = normalized
+        os.environ["CAITI_SESSION_ID"] = normalized
+        return normalized
 
 
 def get_event_db_path() -> str:
@@ -158,8 +177,10 @@ def log_llm_event(
 
 
 __all__ = [
+    "build_session_id",
     "get_event_db_path",
     "get_session_id",
     "init_structured_log",
     "log_llm_event",
+    "set_session_id",
 ]

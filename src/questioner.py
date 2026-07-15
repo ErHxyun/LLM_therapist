@@ -11,6 +11,7 @@ from src.emotion import (
     queue_late_emotion_followup_request,
     wait_for_emotion_result,
 )
+from src.runtime.status_monitor import get_active_status_monitor
 from src.utils.response_bridge import get_openai_resp, is_explicit_stop_request
 from src.utils.text_generators import (
     generate_change,
@@ -25,7 +26,7 @@ from src.utils.session_records import build_question_attempt_record
 
 # Set up logger for this module
 from src.utils.log_util import get_logger
-from src.utils.io_record import append_question_prefix, get_answer, get_resp_log, log_question, set_question_prefix
+from src.utils.io_record import get_answer, get_resp_log, log_question
 logger = get_logger("Questioner")
 
 from src.reflection_validation import parse_rv_decision, rv_reasoner, rv_guide, rv_validation
@@ -60,6 +61,11 @@ Example C (neither):
 GUIDE: Let us focus on sleeping time: in the past week, have you generally slept enough hours most nights?
 '''
 
+FOLLOWUP_CONTINUE_TEXT = "Thank you for your clarification. Let's continue our questions."
+RV_MAX_GUIDE_RETRIES = 2
+_PENDING_NEXT_QUESTION_INTRO = ""
+_PENDING_VALIDATION_TEXT = ""
+
 def _chat_complete(system_content: str, user_content: str):
     """
     Unified LLM entry that delegates to llm_complete.
@@ -76,6 +82,112 @@ def retry_guide(topic: str, original_question: str, original_answer: str) -> str
     logger.info("Generating retry guide for re-ask.")
     payload = f'{{"Topic": {topic!r}, "Original Question": {original_question!r}, "Original Answer": {original_answer!r}}}'
     return _chat_complete(RETRY_GUIDE_SYSTEM_PROMPT, payload)
+
+
+def _set_pending_next_question_intro(text: str) -> None:
+    global _PENDING_NEXT_QUESTION_INTRO
+    _PENDING_NEXT_QUESTION_INTRO = str(text or "").strip()
+
+
+def _pop_pending_next_question_intro() -> str:
+    global _PENDING_NEXT_QUESTION_INTRO
+    text = _PENDING_NEXT_QUESTION_INTRO
+    _PENDING_NEXT_QUESTION_INTRO = ""
+    return text
+
+
+def _set_pending_validation_text(text: str) -> None:
+    global _PENDING_VALIDATION_TEXT
+    _PENDING_VALIDATION_TEXT = str(text or "").strip()
+
+
+def _pop_pending_validation_text() -> str:
+    global _PENDING_VALIDATION_TEXT
+    text = _PENDING_VALIDATION_TEXT
+    _PENDING_VALIDATION_TEXT = ""
+    return text
+
+
+def _strip_spoken_label(text: str) -> str:
+    cleaned = str(text or "").strip()
+    upper = cleaned.upper()
+    for prefix in ("VALIDATION:", "GUIDE:"):
+        if upper.startswith(prefix):
+            return cleaned[len(prefix):].strip()
+    return cleaned
+
+
+def _compose_question_with_intro(question_text: str) -> str:
+    intro = _pop_pending_next_question_intro()
+    question_text = str(question_text or "").strip()
+    if intro and question_text:
+        return f"{intro} {question_text}"
+    return intro or question_text
+
+
+def _publish_question_context(
+    *,
+    text: str,
+    item_id: int | str,
+    question_index: str,
+    dimension: str,
+    expects_response: bool = True,
+    source: str = "screening",
+) -> None:
+    monitor = get_active_status_monitor()
+    if monitor is None:
+        return
+    method = getattr(monitor, "set_prompt", None)
+    if not callable(method):
+        return
+    try:
+        method(
+            text=str(text or ""),
+            source=source,
+            expects_response=bool(expects_response),
+            item_id=str(item_id or ""),
+            question_index=str(question_index or ""),
+            dimension=str(dimension or ""),
+        )
+    except Exception:
+        return
+
+
+def _publish_score_update(
+    *,
+    item_id: int | str,
+    question_index: str,
+    dimension: str,
+    score: int,
+    user_input: str,
+    classification: list[list[Any]],
+    followup_text: str = "",
+) -> None:
+    monitor = get_active_status_monitor()
+    if monitor is None:
+        return
+    method = getattr(monitor, "set_score", None)
+    if not callable(method):
+        return
+    try:
+        method(
+            item_id=str(item_id or ""),
+            question_index=str(question_index or ""),
+            dimension=str(dimension or ""),
+            score=score,
+            user_input=str(user_input or ""),
+            classification=classification,
+            followup_text=str(followup_text or ""),
+        )
+    except Exception:
+        return
+
+
+def reset_questioner_session_state() -> None:
+    global _PENDING_NEXT_QUESTION_INTRO
+    global _PENDING_VALIDATION_TEXT
+    _PENDING_NEXT_QUESTION_INTRO = ""
+    _PENDING_VALIDATION_TEXT = ""
 
 def _is_stop_request(text: str) -> bool:
     return is_explicit_stop_request(text)
@@ -195,11 +307,12 @@ def _maybe_build_emotion_followup(
         return None
 
 
-def _apply_late_emotion_followup_prefix() -> None:
+def _run_late_emotion_followup_before_question(session_control=None) -> bool:
     try:
+        validation_text = _strip_spoken_label(_pop_pending_validation_text())
         decision = pop_late_emotion_followup()
         if not decision or not decision.should_follow_up:
-            return
+            return False
         metadata = dict(getattr(decision, "metadata", {}) or {})
         metadata.update(
             {
@@ -218,10 +331,20 @@ def _apply_late_emotion_followup_prefix() -> None:
             normalized_output=decision.reason,
             metadata=metadata,
         )
-        append_question_prefix(decision.followup_text)
-        logger.info("Queued late emotion follow-up before next question: %s", decision.reason)
+        followup_text = str(decision.followup_text or "").strip()
+        combined_prompt = f"{validation_text} {followup_text}".strip() if validation_text else followup_text
+        log_question(combined_prompt)
+        user_response = _get_resp_log_with_control(session_control)
+        if _checkpoint_requested_skip_to_cbt(session_control):
+            logger.info("Late emotion follow-up interrupted by skip-to-CBT request.")
+            return True
+        if _is_stop_request(user_response):
+            logger.info("User requested stop during late emotion follow-up.")
+            return True
+        logger.info("Completed late emotion follow-up before next question: %s", decision.reason)
     except Exception as exc:
         logger.warning("Late emotion follow-up check failed: %s", exc)
+    return False
 
 
 def _emotion_note_lines(decision) -> List[str]:
@@ -338,6 +461,15 @@ def _if_valid_response(
             ]
             note_resp.extend(_emotion_note_lines(emotion_decision))
             question_lib[str(item_index)][str(question_index)]["notes"].append(note_resp)
+            _publish_score_update(
+                item_id=item_index,
+                question_index=question_index,
+                dimension=question_label,
+                score=score,
+                user_input=answer_text,
+                classification=[[str(label_norm), score_norm]],
+                followup_text=followup_to_RV,
+            )
             logger.debug("Appended note to question_lib[%s][%s]['notes'].", str(item_index), str(question_index))
             return 1, 0, followup_to_RV, question_lib
 
@@ -360,6 +492,15 @@ def _if_valid_response(
             ]
             note_resp.extend(_emotion_note_lines(emotion_decision))
             question_lib[str(item_index)][str(question_index)]["notes"].append(note_resp)
+            _publish_score_update(
+                item_id=item_index,
+                question_index=question_index,
+                dimension=question_label,
+                score=int(score_norm),
+                user_input=answer_text,
+                classification=[[str(label_norm), score_norm]],
+                followup_text=followup_to_RV,
+            )
             logger.debug("Appended note to question_lib[%s][%s]['notes'].", str(item_index), str(question_index))
             return 1, 0, followup_to_RV, question_lib
 
@@ -407,6 +548,8 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
         followup_responses = [user_response]
         rv_stopped = _is_stop_request(user_response)
 
+        rv_retry_limit = max(0, int(RV_MAX_GUIDE_RETRIES))
+        rv_retry_count = 0
         while not rv_stopped:
             logger.info(f"Running ReflectionValidation reasoner for topic '{topic}'.")
             rv_decision_raw = rv_reasoner(topic, original_question_asked, original_resp, user_response)
@@ -416,6 +559,13 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
             logger.info(f"ReflectionValidation decision: {rv_decision_token}")
 
             if rv_decision_token == "0":
+                break
+
+            if rv_retry_count >= rv_retry_limit:
+                logger.info(
+                    "ReflectionValidation retries exhausted after %s guide attempt(s); continuing without further recollection.",
+                    rv_retry_count,
+                )
                 break
 
             logger.info("Follow-up not related, generating guidance and recollecting follow-up.")
@@ -428,15 +578,19 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
                 return valid, 1, previous_question, question_lib
             followup_responses.append(user_response)
             rv_stopped = _is_stop_request(user_response)
+            rv_retry_count += 1
 
         rv_validation_text = ""
         if rv_decision_token == "0" and not rv_stopped:
             # Empathic validation happens only after the Reasoner accepts the follow-up.
             logger.info("Running ReflectionValidation empathic validation.")
             rv_validation_text = rv_validation(topic, original_question_asked, original_resp, user_response)
-            # Set validation text to be prepended to the next user-facing question
-            set_question_prefix(rv_validation_text)
-            logger.info("Queued RV validation to prepend before next question output.")
+            _set_pending_validation_text(rv_validation_text)
+            _set_pending_next_question_intro(FOLLOWUP_CONTINUE_TEXT)
+            logger.info("Queued validation for the next combined follow-up/question prompt.")
+        elif rv_decision_token != "0" and not rv_stopped and rv_retry_count >= rv_retry_limit:
+            _set_pending_next_question_intro(FOLLOWUP_CONTINUE_TEXT)
+            logger.info("Proceeding to the next question after ReflectionValidation retry limit was reached.")
         
         # Skip generating therapist response to avoid unnecessary LLM calls
         therapist_resp = ""
@@ -450,6 +604,10 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
             "rv_decision: " + rv_decision_token,
             "rv_decision_raw: " + " | ".join(rv_decision_raws),
             "rv_guide: " + " | ".join(rv_guide_texts),
+            "rv_retry_count: " + str(rv_retry_count),
+            "rv_retry_exhausted: " + str(
+                rv_decision_token != "0" and not rv_stopped and rv_retry_count >= rv_retry_limit
+            ).lower(),
             "followup_resp_1: " + (followup_responses[-1] if len(followup_responses) > 1 else ""),
             "rv_validation: " + rv_validation_text,
             "therapist_resp: " + therapist_resp
@@ -483,7 +641,9 @@ def ask_question(
         # Check if the score list for this item is empty (i.e., not answered yet)
         if len(question_lib[str(S)][str(question_A)]["score"]) == 0:
             # if the item is not answered yet, ask it directly
-            _apply_late_emotion_followup_prefix()
+            if _run_late_emotion_followup_before_question(session_control):
+                logger.info("Late emotion follow-up ended the screening flow before the next question.")
+                return 0.0, 1, previous_question
             
             # Get the number of available question variants for this item
             number_of_questions = len(question_lib[str(S)][str(question_A)]["question"])
@@ -493,9 +653,17 @@ def ask_question(
             # Ask the vetted library wording directly. Runtime paraphrases can
             # drift polarity, which breaks the fixed Yes/No score mapping.
             # Concatenate the last question (context) with the current question
-            question_text_ask = question_text
+            question_text_ask = _compose_question_with_intro(question_text)
             # Log the question being asked
             log_question(question_text_ask)
+            _publish_question_context(
+                text=question_text_ask,
+                item_id=S,
+                question_index=question_A,
+                dimension=question_lib[str(S)][str(question_A)]["label"],
+                expects_response=True,
+                source="screening",
+            )
             # Get user input for the question
             _ , user_input = _get_answer_with_control(session_control)
             if _checkpoint_requested_skip_to_cbt(session_control):
@@ -536,6 +704,14 @@ def ask_question(
                 guide_text = retry_guide(topic, question_text, original_answer_text)
                 # Show the guide to the user and collect a new response
                 log_question(guide_text)
+                _publish_question_context(
+                    text=guide_text,
+                    item_id=S,
+                    question_index=question_A,
+                    dimension=dimension_label,
+                    expects_response=True,
+                    source="retry_guide",
+                )
                 _ , user_input = _get_answer_with_control(session_control)
                 if _checkpoint_requested_skip_to_cbt(session_control):
                     logger.info("Screening retry interrupted by skip-to-CBT request.")

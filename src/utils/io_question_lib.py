@@ -1,7 +1,7 @@
 import json
 import csv
 import os
-from src.utils.config_loader import REPORT_FILE, NOTES_FILE
+from src.utils import config_loader
 
 def load_question_lib(path: str):
     with open(path, "r", encoding="utf-8") as f:
@@ -47,9 +47,11 @@ def _format_analysis(label, notes):
 def generate_results(
     question_lib: dict,
     new_response: list,
-    report_file: str = REPORT_FILE,
-    notes_file: str = NOTES_FILE
+    report_file: str | None = None,
+    notes_file: str | None = None,
 ):
+    report_file = str(report_file or config_loader.REPORT_FILE)
+    notes_file = str(notes_file or config_loader.NOTES_FILE)
     os.makedirs(os.path.dirname(report_file), exist_ok=True)
     os.makedirs(os.path.dirname(notes_file), exist_ok=True)
 

@@ -5,10 +5,27 @@ import tempfile
 import unittest
 
 from src.local_llm.types import LLMTask
-from src.utils.session_event_logger import log_llm_event
+from src.utils.session_event_logger import build_session_id, get_session_id, log_llm_event, set_session_id
 
 
 class SessionEventLoggerTest(unittest.TestCase):
+    def test_set_session_id_updates_process_default(self):
+        previous = os.environ.get("CAITI_SESSION_ID")
+        try:
+            new_session_id = set_session_id("unit-test-session")
+            self.assertEqual(new_session_id, "unit-test-session")
+            self.assertEqual(get_session_id(), "unit-test-session")
+            self.assertEqual(os.environ.get("CAITI_SESSION_ID"), "unit-test-session")
+        finally:
+            if previous is None:
+                os.environ.pop("CAITI_SESSION_ID", None)
+            else:
+                os.environ["CAITI_SESSION_ID"] = previous
+
+    def test_build_session_id_uses_subject_prefix(self):
+        session_id = build_session_id("participant42")
+        self.assertTrue(session_id.startswith("participant42_"))
+
     def test_log_llm_event_writes_sqlite_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "events.sqlite3")
