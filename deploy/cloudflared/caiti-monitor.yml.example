@@ -1,0 +1,10 @@
+tunnel: YOUR_TUNNEL_UUID
+credentials-file: /etc/cloudflared/YOUR_TUNNEL_UUID.json
+
+ingress:
+  - hostname: monitor.example.com
+    service: http://127.0.0.1:8765
+    originRequest:
+      connectTimeout: 10s
+      noTLSVerify: true
+  - service: http_status:404

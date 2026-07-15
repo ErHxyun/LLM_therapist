@@ -1,0 +1,21 @@
+[Unit]
+Description=CaiTI persistent local LLM server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xiyun
+Group=xiyun
+WorkingDirectory=/home/xiyun/Desktop/Projects/LLM_therapist
+Environment=PYTHONUNBUFFERED=1
+Environment=CAITI_DEVICE_MAP=cuda:0
+ExecStart=/usr/bin/env bash -lc 'cd /home/xiyun/Desktop/Projects/LLM_therapist && exec python scripts/run_llm_server.py --host 127.0.0.1 --port 8890'
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+StandardOutput=append:/home/xiyun/Desktop/Projects/LLM_therapist/data/logs/systemd-caiti-llm.log
+StandardError=append:/home/xiyun/Desktop/Projects/LLM_therapist/data/logs/systemd-caiti-llm.log
+
+[Install]
+WantedBy=multi-user.target

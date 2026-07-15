@@ -1,0 +1,30 @@
+[Unit]
+Description=CaiTI headless voice application (user audio session)
+After=default.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/xiyun/Desktop/Projects/LLM_therapist
+Environment=PYTHONUNBUFFERED=1
+Environment=CAITI_DEVICE_MAP=cuda:0
+Environment=CAITI_LLM_SERVER_URL=http://127.0.0.1:8890
+Environment=CAITI_EMOTION_ENABLED=true
+Environment=CAITI_EMOTION_SERVICE_URL=http://127.0.0.1:8000/analyze
+Environment=CAITI_MONITOR_ENABLED=true
+Environment=CAITI_PERSISTENT_APP_LOOP=true
+ExecStartPre=/usr/bin/env bash /home/xiyun/Desktop/Projects/LLM_therapist/scripts/cleanup_audio.sh
+ExecStartPre=/usr/bin/env bash -lc 'for i in $(seq 1 180); do curl -fsS http://127.0.0.1:8890/health >/dev/null && exit 0; sleep 1; done; exit 1'
+ExecStartPre=/usr/bin/env bash -lc 'for i in $(seq 1 190); do curl -fsS http://127.0.0.1:8000/health >/dev/null && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/bin/env bash -lc 'cd /home/xiyun/Desktop/Projects/LLM_therapist && exec ./scripts/run_voice_app.sh'
+ExecStopPost=/usr/bin/env bash /home/xiyun/Desktop/Projects/LLM_therapist/scripts/cleanup_audio.sh
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=control-group
+UMask=002
+StandardOutput=append:/home/xiyun/Desktop/Projects/LLM_therapist/data/logs/systemd-caiti-app.log
+StandardError=append:/home/xiyun/Desktop/Projects/LLM_therapist/data/logs/systemd-caiti-app.log
+
+[Install]
+WantedBy=default.target

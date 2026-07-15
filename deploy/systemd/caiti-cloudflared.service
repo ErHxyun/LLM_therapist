@@ -1,0 +1,20 @@
+[Unit]
+Description=CaiTI remote monitor Cloudflare Tunnel
+After=network-online.target caiti-app.service
+Wants=network-online.target caiti-app.service
+
+[Service]
+Type=simple
+User=xiyun
+Group=xiyun
+WorkingDirectory=/home/xiyun/Desktop/Projects/LLM_therapist
+ExecStartPre=/usr/bin/env bash -lc 'test -f /etc/cloudflared/caiti-monitor.yml'
+ExecStart=/usr/bin/env bash -lc 'exec cloudflared tunnel --config /etc/cloudflared/caiti-monitor.yml run'
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+StandardOutput=append:/home/xiyun/Desktop/Projects/LLM_therapist/data/logs/systemd-caiti-cloudflared.log
+StandardError=append:/home/xiyun/Desktop/Projects/LLM_therapist/data/logs/systemd-caiti-cloudflared.log
+
+[Install]
+WantedBy=multi-user.target

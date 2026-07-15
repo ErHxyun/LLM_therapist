@@ -277,14 +277,13 @@ INTERMISSION_LEAD_IN_TEXT = os.environ.get(
     str(
         INTERMISSION.get(
             "lead_in_text",
-            "Caiti needs a little time to think. While we wait, let's do a private check-in. "
-            "This stays separate from our main conversation.",
+            "Let's do a brief check-in together.",
         )
     ),
 )
 INTERMISSION_BRIDGE_TEXT = os.environ.get(
     "CAITI_INTERMISSION_BRIDGE_TEXT",
-    str(INTERMISSION.get("bridge_text", "Caiti is ready now. Let's come back to the main questions.")),
+    str(INTERMISSION.get("bridge_text", "Let's go back to the main session.")),
 )
 INTERMISSION_TRANSITION_DELAY_SEC = float(
     os.environ.get(

@@ -49,13 +49,13 @@ voice:
   # Paper Section 4 keeps semantic analysis text-only. These commands are I/O only:
   # STT converts microphone audio to text before the LLM pipeline; TTS speaks text after generation.
   stt_backend: "faster_whisper" # console | command | faster_whisper
-  tts_backend: "persistent_piper" # console | command | persistent_piper
-  stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 30 --audio-device plughw:0,0 --stt-device cpu --compute-type int8 --beam-size 1 --best-of 1 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --trailing-pad-sec 0.4 --no-speech-timeout-sec 5"
+  tts_backend: "command" # console | command | persistent_piper
+  stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 40 --audio-device default --stt-device cpu --compute-type int8 --beam-size 1 --best-of 1 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --trailing-pad-sec 0.4 --no-speech-timeout-sec 8"
   stt_whisper_model: "small.en"
-  stt_record_seconds: 30
+  stt_record_seconds: 40
   stt_sample_rate: 16000
   stt_channels: 1
-  stt_audio_device: "plughw:0,0"
+  stt_audio_device: "default"
   stt_device: "cpu"
   stt_compute_type: "int8"
   # Interactive latency profile: raise these to 5 for slower, more exhaustive decoding.
@@ -73,8 +73,8 @@ voice:
   stt_trailing_pad_sec: 0.4
   stt_min_speech_seconds: 0.25
   stt_min_record_seconds: 1.0
-  stt_no_speech_timeout_sec: 5.0
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player aplay --sentence-silence 0.25"
+  stt_no_speech_timeout_sec: 8.0
+  tts_command: 'python scripts/piper_tts_command.py --model models/piper/en_US-amy-medium.onnx --player "mpv --no-video --really-quiet --force-window=no --audio-display=no --no-config --audio-client-name=CaiTI-TTS" --length-scale 1.05 --sentence-silence 0.28 --no-cache'
   stt_timeout_sec: 120
   tts_timeout_sec: 60
   empty_transcript_retries: 2
@@ -95,7 +95,7 @@ intermission:
   # does not call the LLM, and does not update RL/CBT scores or user reports.
   enabled: true
   tts_backend: "persistent_piper" # command | persistent_piper | primary
-  tts_command: "python scripts/piper_tts_command.py --model models/piper/en_US-lessac-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6"
+  tts_command: 'python scripts/piper_tts_command.py --model models/piper/en_US-lessac-medium.onnx --player aplay --length-scale 1.1 --sentence-silence 0.6'
   fallback_to_primary_tts: true
   screening_enabled: true
   breathing_enabled: true
@@ -104,18 +104,17 @@ intermission:
   poll_interval_sec: 0.1
   # PHQ-2 + GAD-4 items are spread across thinking gaps by default.
   max_screening_items_per_turn: 1
-  # Only start a mini-task after a longer main-session user answer.
-  # Eligible long-answer turns must pass the interval counter and probability gate.
-  trigger_min_user_speech_sec: 10.0
+  # Start a mini-task on every third longer main-session user answer.
+  trigger_min_user_speech_sec: 15.0
   trigger_min_interval_turns: 2
-  trigger_probability: 0.5
-  cooldown_turns: 1
+  trigger_probability: 1.0
+  cooldown_turns: 0
   # Stores private PHQ/GAD item statuses outside record.csv.
   persist_results: true
   db_path: "" # empty = data/logs/session_events.sqlite3
   results_json_path: "data/phq_gad_results.json"
-  lead_in_text: "Caiti needs a little time to think. While we wait, let's do a brief check-in."
-  bridge_text: "Caiti is ready now. Let's come back to the main questions."
+  lead_in_text: "Let's do a brief check-in together."
+  bridge_text: "Let's go back to the main session."
   transition_delay_sec: 2.0
 
 emotion:
@@ -131,11 +130,11 @@ emotion:
   keep_audio: false
   # Emotion may add a gentle follow-up, but it never changes 0/1/2 scoring.
   assist_followup_enabled: true
-  assist_wait_timeout_sec: 3.0
-  assist_late_followup_window_sec: 10.0
-  assist_min_confidence: 50
-  assist_risk_threshold: 60
-  assist_light_risk_threshold: 45
+  assist_wait_timeout_sec: 1.5
+  assist_late_followup_window_sec: 20.0
+  assist_min_confidence: 70
+  assist_risk_threshold: 65
+  assist_light_risk_threshold: 55
 
 hardware:
   # Optional Jetson 40-pin header controls.
@@ -179,8 +178,9 @@ hardware:
   session_button_active_low: true
 
 monitor:
-  # Local browser monitor for software state:
-  # http://127.0.0.1:8765
+  # Browser monitor for software state:
+  # local:  http://127.0.0.1:8765
+  # remote: http://<jetson-ip>:8765
   enabled: true
-  host: "127.0.0.1"
+  host: "0.0.0.0"
   port: 8765

@@ -340,9 +340,9 @@ intermission:
   max_seconds: 45
   max_screening_items_per_turn: 1
   trigger_min_user_speech_sec: 10.0
-  trigger_min_interval_turns: 2
-  trigger_probability: 0.5
-  cooldown_turns: 1
+  trigger_min_interval_turns: 1
+  trigger_probability: 1.0
+  cooldown_turns: 0
   persist_results: true
   db_path: ""
   results_json_path: "data/phq_gad_results.json"
@@ -357,10 +357,10 @@ emotion:
   audio_dir: "data/emotion/audio"
   keep_audio: false
   assist_followup_enabled: true
-  assist_wait_timeout_sec: 3.0
-  assist_late_followup_window_sec: 10.0
+  assist_wait_timeout_sec: 1.5
+  assist_late_followup_window_sec: 20.0
   assist_min_confidence: 50
-  assist_risk_threshold: 60
+  assist_risk_threshold: 55
   assist_light_risk_threshold: 45
 ```
 
@@ -407,10 +407,9 @@ check-ins are framed as private, optional mini-tasks and are stored in the
 structured SQLite intermission tables plus `data/phq_gad_results.json`,
 separate from the main CaiTI question/response record. By default, mini-tasks
 only start after a main-session user answer with at least 10 seconds of
-captured speech. The eligible
-long-answer counter must then be greater than 2, and the final trigger uses
-`trigger_probability` randomness. If an activity runs, it cools down for one
-turn. The
+captured speech. The default `trigger_min_interval_turns: 1` means the first
+eligible long-answer turn is counted, and the second eligible long-answer
+thinking gap can use the waiting time. The
 intermission voice is configured separately;
 until the male Piper model is present, `fallback_to_primary_tts: true` keeps
 the app audible with CaiTI's primary voice.
@@ -425,11 +424,19 @@ scoring, or final reports. When `assist_followup_enabled` is on, the main
 session waits up to `assist_wait_timeout_sec` for a reliable emotion result. If
 it arrives in time, a mismatch or strong strained vocal cue can add one gentle
 follow-up during the current question flow, but it never changes the text-based
-`0/1/2` score. If the result arrives after that wait but within
-`assist_late_followup_window_sec`, the follow-up is queued and prepended before
-the next screening question. If the service is down, too slow, low-confidence,
-or reports poor audio quality, the main session continues without
-emotion-assisted follow-up and the side-channel records the row.
+`0/1/2` score. For high-content scores, a moderate emotion risk can also add a
+short meaning-check follow-up when the tone may be sarcastic, exaggerated, or
+otherwise worth clarifying. If the result arrives after that wait but within
+`assist_late_followup_window_sec`, the follow-up is asked as its own turn
+before the next screening question, followed by a short transition message.
+Reflection-validation acceptance also uses a short standalone transition
+message instead of prepending validation text to the next question. If the
+service is down, too slow, low-confidence, or reports poor audio quality, the
+main session continues without
+emotion-assisted follow-up and the side-channel records the row. Completed
+emotion calls also log a compact score summary with latency, credibility risk,
+confidence, audio/context emotion labels, consistency flags, and key audio/text
+scores.
 
 To temporarily fall back to console input/output:
 
@@ -476,6 +483,19 @@ To change ports:
 ```bash
 CAITI_NODE_MONITOR_PORT=8790 CAITI_MONITOR_URL=http://127.0.0.1:8765 npm run monitor
 ```
+
+### Remote Monitor on a Real Domain
+
+To publish the research monitor on a domain such as
+`https://monitor.example.com`, use the Cloudflare Tunnel deployment under:
+
+- [deploy/cloudflared/README.md](deploy/cloudflared/README.md)
+
+That path is recommended over exposing port `8765` directly because the monitor
+can display participant IDs, answers, scores, emotion summaries, and session
+history. The deployment keeps the origin on `127.0.0.1:8765`, publishes it
+through `cloudflared`, and protects access with Cloudflare Access login
+policies.
 
 To debug STT quality without running the full CaiTI session:
 

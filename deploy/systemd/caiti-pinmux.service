@@ -1,0 +1,13 @@
+[Unit]
+Description=CaiTI Jetson GPIO pinmux setup
+DefaultDependencies=no
+After=local-fs.target
+Before=multi-user.target caiti-app.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bash /home/xiyun/Desktop/Projects/LLM_therapist/scripts/setup_jetson_pinmux.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

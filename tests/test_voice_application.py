@@ -5,6 +5,176 @@ import LLM_therapist_Voice_Application as app
 
 
 class VoiceApplicationTests(unittest.TestCase):
+    def test_confirm_identity_candidate_accepts_retry_then_yes(self):
+        spoken = []
+        responses = iter(["maybe", "yes"])
+        originals = {
+            "_speak_prompt": app._speak_prompt,
+            "_listen_with_stt": app._listen_with_stt,
+        }
+        try:
+            app._speak_prompt = lambda *_args, **_kwargs: spoken.append(_args[3])
+            app._listen_with_stt = lambda *_args, **_kwargs: next(responses)
+            confirmed = app._confirm_identity_candidate(
+                stt=object(),
+                tts=object(),
+                music=object(),
+                status_leds=object(),
+                candidate="8080",
+                confirm_prompt_template=app.USER_ID_CONFIRM_PROMPT,
+                retry_prompt=app.USER_ID_CONFIRM_RETRY_PROMPT,
+            )
+        finally:
+            app._speak_prompt = originals["_speak_prompt"]
+            app._listen_with_stt = originals["_listen_with_stt"]
+
+        self.assertTrue(confirmed)
+        self.assertEqual(
+            spoken,
+            [
+                "I heard your participant ID as 8080. Is that correct? Please say yes or no.",
+                "Please say yes if that participant ID is correct, or say no if you want to try again.",
+            ],
+        )
+
+    def test_collect_confirmed_identity_field_retries_when_confirmation_is_no(self):
+        prompts = []
+        candidates = iter(["eight zero eight zero", "zero zero one"])
+        confirmations = iter([False, True])
+        originals = {
+            "_collect_identity_field": app._collect_identity_field,
+            "_confirm_identity_candidate": app._confirm_identity_candidate,
+        }
+        try:
+            def fake_collect_identity_field(**kwargs):
+                prompts.append(kwargs["initial_prompt"])
+                return next(candidates)
+
+            def fake_confirm_identity_candidate(**kwargs):
+                return next(confirmations)
+
+            app._collect_identity_field = fake_collect_identity_field
+            app._confirm_identity_candidate = fake_confirm_identity_candidate
+
+            value = app._collect_confirmed_identity_field(
+                stt=object(),
+                tts=object(),
+                music=object(),
+                status_leds=object(),
+                initial_prompt=app.USER_ID_PROMPT,
+                retry_prompt=app.USER_ID_RETRY_PROMPT,
+                confirm_prompt_template=app.USER_ID_CONFIRM_PROMPT,
+                confirm_retry_prompt=app.USER_ID_CONFIRM_RETRY_PROMPT,
+                reenter_prompt=app.USER_ID_REENTER_PROMPT,
+                normalizer=app.normalize_spoken_user_id,
+            )
+        finally:
+            app._collect_identity_field = originals["_collect_identity_field"]
+            app._confirm_identity_candidate = originals["_confirm_identity_candidate"]
+
+        self.assertEqual(value, "001")
+        self.assertEqual(prompts, [app.USER_ID_PROMPT, app.USER_ID_REENTER_PROMPT])
+
+    def test_wait_for_session_start_persistent_mode_marks_ready_idle_and_waits(self):
+        events = []
+
+        class FakeSessionControl:
+            def reset_for_next_session(self):
+                events.append("session.reset")
+
+            def set_phase(self, phase):
+                events.append(f"session.phase:{phase}")
+
+            def wait_for_start(self):
+                events.append("session.wait_start")
+                return True
+
+        started = app._wait_for_session_start(
+            FakeSessionControl(),
+            status_monitor=None,
+            persistent_loop=True,
+        )
+
+        self.assertTrue(started)
+        self.assertEqual(
+            events,
+            [
+                "session.phase:ready_idle",
+                "session.wait_start",
+            ],
+        )
+
+    def test_reset_session_runtime_resets_data_and_sets_session_id(self):
+        events = []
+
+        class FakeSessionControl:
+            def reset_for_next_session(self):
+                events.append("session.reset")
+
+        originals = {
+            "build_session_id": app.build_session_id,
+            "set_session_id": app.set_session_id,
+            "reset_record_state": app.reset_record_state,
+            "reset_questioner_session_state": app.reset_questioner_session_state,
+            "clear_emotion_session_state": app.clear_emotion_session_state,
+        }
+
+        try:
+            app.build_session_id = lambda subject_id=None: events.append(f"build_session_id:{subject_id}") or "session-123"
+            app.set_session_id = lambda session_id: events.append(f"set_session_id:{session_id}") or session_id
+            app.reset_record_state = lambda: events.append("reset_record")
+            app.reset_questioner_session_state = lambda: events.append("reset_questioner")
+            app.clear_emotion_session_state = lambda: events.append("reset_emotion")
+
+            session_id = app._reset_session_runtime(FakeSessionControl(), subject_id="8080")
+        finally:
+            app.build_session_id = originals["build_session_id"]
+            app.set_session_id = originals["set_session_id"]
+            app.reset_record_state = originals["reset_record_state"]
+            app.reset_questioner_session_state = originals["reset_questioner_session_state"]
+            app.clear_emotion_session_state = originals["clear_emotion_session_state"]
+
+        self.assertEqual(session_id, "session-123")
+        self.assertEqual(
+            events,
+            [
+                "build_session_id:8080",
+                "set_session_id:session-123",
+                "reset_record",
+                "reset_questioner",
+                "reset_emotion",
+            ],
+        )
+
+    def test_cleanup_after_session_cycle_resets_session_control(self):
+        events = []
+
+        class FakeSessionControl:
+            def set_phase(self, phase):
+                events.append(f"phase:{phase}")
+
+            def reset_for_next_session(self):
+                events.append("session.reset")
+
+        class FakeMusic:
+            def stop(self):
+                events.append("music.stop")
+
+        originals = {
+            "wait_for_voice_io_drain": app.wait_for_voice_io_drain,
+        }
+        try:
+            app.wait_for_voice_io_drain = lambda *_args, **_kwargs: events.append("drain") or True
+            app._cleanup_after_session_cycle(
+                session_control=FakeSessionControl(),
+                music=FakeMusic(),
+                voice_idle=object(),
+            )
+        finally:
+            app.wait_for_voice_io_drain = originals["wait_for_voice_io_drain"]
+
+        self.assertEqual(events, ["phase:cleanup", "drain", "music.stop", "session.reset"])
+
     def test_short_press_restarts_music_when_resuming_while_voice_io_idle(self):
         events = []
 
@@ -182,6 +352,53 @@ class VoiceApplicationTests(unittest.TestCase):
         )
 
         self.assertEqual(events, ["short", "music.pause", "short", "music.resume"])
+
+    def test_listen_with_stt_pauses_background_music_and_resumes_afterward(self):
+        events = []
+
+        class FakeSTT:
+            def set_interrupt_check(self, checker):
+                events.append(f"interrupt:{checker is not None}")
+
+            def listen(self):
+                events.append("stt.listen")
+                return "8080"
+
+        class FakeMusic:
+            def is_background(self):
+                return True
+
+            def is_playing(self):
+                return True
+
+            def pause(self):
+                events.append("music.pause")
+
+            def resume(self):
+                events.append("music.resume")
+
+            def restore_volume(self):
+                events.append("music.restore")
+
+        class FakeStatusLEDs:
+            def set_stt_active(self, active):
+                events.append(f"green:{active}")
+
+        response = app._listen_with_stt(FakeSTT(), FakeMusic(), FakeStatusLEDs())
+
+        self.assertEqual(response, "8080")
+        self.assertEqual(
+            events,
+            [
+                "interrupt:False",
+                "music.pause",
+                "green:True",
+                "stt.listen",
+                "green:False",
+                "music.resume",
+                "interrupt:False",
+            ],
+        )
 
     def test_shutdown_message_ducks_music_and_uses_tts_led_status(self):
         events = []
@@ -489,10 +706,10 @@ class VoiceApplicationTests(unittest.TestCase):
                 return self.value
 
         originals = {
-            "init_record": app.init_record,
             "build_stt": app.build_stt,
             "build_tts": app.build_tts,
             "build_music": app.build_music,
+            "_prepare_user_session": app._prepare_user_session,
             "build_intermission_runner": app.build_intermission_runner,
             "build_session_control": app.build_session_control,
             "build_session_button_controller": app.build_session_button_controller,
@@ -511,10 +728,10 @@ class VoiceApplicationTests(unittest.TestCase):
             "_warm_up_stt": app._warm_up_stt,
         }
         try:
-            app.init_record = lambda: events.append("init_record")
             app.build_stt = lambda: "stt"
             app.build_tts = lambda: "tts"
             app.build_music = lambda: FakeMusic()
+            app._prepare_user_session = lambda *_args, **_kwargs: events.append("prepare_user_session") or "session-123"
             app.build_intermission_runner = lambda **_kwargs: events.append("intermission.build") or "intermission"
             app.build_status_monitor = lambda: FakeStatusMonitor()
             app.build_session_control = lambda **_kwargs: FakeSessionControl()
@@ -534,10 +751,10 @@ class VoiceApplicationTests(unittest.TestCase):
 
             app.main()
         finally:
-            app.init_record = originals["init_record"]
             app.build_stt = originals["build_stt"]
             app.build_tts = originals["build_tts"]
             app.build_music = originals["build_music"]
+            app._prepare_user_session = originals["_prepare_user_session"]
             app.build_intermission_runner = originals["build_intermission_runner"]
             app.build_session_control = originals["build_session_control"]
             app.build_session_button_controller = originals["build_session_button_controller"]
@@ -558,7 +775,6 @@ class VoiceApplicationTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                "init_record",
                 "intermission.build",
                 "event.set",
                 "thread.init",
@@ -570,6 +786,7 @@ class VoiceApplicationTests(unittest.TestCase):
                 "music_mode.start",
                 "session_button.start",
                 "session.wait_start",
+                "prepare_user_session",
                 "music.start",
                 "preload_llm_runtime",
                 "warm_up_tts",
@@ -591,6 +808,175 @@ class VoiceApplicationTests(unittest.TestCase):
                 "sleep",
             ],
         )
+
+    def test_main_defers_background_music_autostart_until_voice_io_needs_it(self):
+        events = []
+
+        class FakeMusic:
+            def is_background(self):
+                return True
+
+            def start(self):
+                events.append("music.start")
+
+            def stop(self):
+                events.append("music.stop")
+
+        class FakeVolumeButtons:
+            def start(self):
+                return
+
+            def stop(self):
+                return
+
+        class FakeMusicModeButton:
+            def start(self):
+                return
+
+            def stop(self):
+                return
+
+        class FakeSessionButton:
+            def start(self):
+                return True
+
+            def stop(self):
+                return
+
+        class FakeSessionControl:
+            settings = type("Settings", (), {"enabled": True})()
+
+            def wait_for_start(self):
+                return True
+
+            def mark_screening(self):
+                events.append("session.mark_screening")
+
+            def mark_closing(self):
+                events.append("session.mark_closing")
+
+            def checkpoint(self, location):
+                events.append(f"session.checkpoint:{location}")
+                return "continue"
+
+            def is_paused(self):
+                return False
+
+            def is_shutdown_requested(self):
+                return False
+
+        class FakeStatusLEDs:
+            def start(self):
+                return
+
+            def stop(self):
+                return
+
+        class FakeStatusMonitor:
+            url = "http://127.0.0.1:8765"
+
+            def start(self):
+                return False
+
+            def stop(self):
+                return
+
+            def set_phase(self, phase):
+                events.append(f"monitor.phase:{phase}")
+
+        class FakeHandler:
+            def __init__(self, *args, **kwargs):
+                return
+
+            def run(self):
+                events.append("handler.run")
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs):
+                return
+
+            def start(self):
+                return
+
+        class FakeEvent:
+            def __init__(self):
+                self.value = False
+
+            def set(self):
+                self.value = True
+
+            def is_set(self):
+                return self.value
+
+        originals = {
+            "build_stt": app.build_stt,
+            "build_tts": app.build_tts,
+            "build_music": app.build_music,
+            "_prepare_user_session": app._prepare_user_session,
+            "build_intermission_runner": app.build_intermission_runner,
+            "build_session_control": app.build_session_control,
+            "build_session_button_controller": app.build_session_button_controller,
+            "build_status_led_controller": app.build_status_led_controller,
+            "build_status_monitor": app.build_status_monitor,
+            "build_volume_button_controller": app.build_volume_button_controller,
+            "build_music_mode_button_controller": app.build_music_mode_button_controller,
+            "HandlerRL": app.HandlerRL,
+            "threading.Thread": app.threading.Thread,
+            "threading.Event": app.threading.Event,
+            "wait_for_voice_io_drain": app.wait_for_voice_io_drain,
+            "time.sleep": app.time.sleep,
+            "_preload_llm_runtime": app._preload_llm_runtime,
+            "_warm_up_tts": app._warm_up_tts,
+            "_warm_up_intermission_tts": app._warm_up_intermission_tts,
+            "_warm_up_stt": app._warm_up_stt,
+        }
+        try:
+            app.build_stt = lambda: "stt"
+            app.build_tts = lambda: "tts"
+            app.build_music = lambda: FakeMusic()
+            app._prepare_user_session = lambda *_args, **_kwargs: events.append("prepare_user_session") or "session-123"
+            app.build_intermission_runner = lambda **_kwargs: "intermission"
+            app.build_status_monitor = lambda: FakeStatusMonitor()
+            app.build_session_control = lambda **_kwargs: FakeSessionControl()
+            app.build_session_button_controller = lambda _short, _long: FakeSessionButton()
+            app.build_status_led_controller = lambda **_kwargs: FakeStatusLEDs()
+            app.build_volume_button_controller = lambda: FakeVolumeButtons()
+            app.build_music_mode_button_controller = lambda _press: FakeMusicModeButton()
+            app.HandlerRL = FakeHandler
+            app._preload_llm_runtime = lambda: None
+            app._warm_up_tts = lambda _tts: None
+            app._warm_up_intermission_tts = lambda _runner, _tts: None
+            app._warm_up_stt = lambda _stt: None
+            app.threading.Thread = FakeThread
+            app.threading.Event = FakeEvent
+            app.wait_for_voice_io_drain = lambda *_args, **_kwargs: True
+            app.time.sleep = lambda _seconds: None
+
+            app.main()
+        finally:
+            app.build_stt = originals["build_stt"]
+            app.build_tts = originals["build_tts"]
+            app.build_music = originals["build_music"]
+            app._prepare_user_session = originals["_prepare_user_session"]
+            app.build_intermission_runner = originals["build_intermission_runner"]
+            app.build_session_control = originals["build_session_control"]
+            app.build_session_button_controller = originals["build_session_button_controller"]
+            app.build_status_led_controller = originals["build_status_led_controller"]
+            app.build_status_monitor = originals["build_status_monitor"]
+            app.build_volume_button_controller = originals["build_volume_button_controller"]
+            app.build_music_mode_button_controller = originals["build_music_mode_button_controller"]
+            app.HandlerRL = originals["HandlerRL"]
+            app.threading.Thread = originals["threading.Thread"]
+            app.threading.Event = originals["threading.Event"]
+            app.wait_for_voice_io_drain = originals["wait_for_voice_io_drain"]
+            app.time.sleep = originals["time.sleep"]
+            app._preload_llm_runtime = originals["_preload_llm_runtime"]
+            app._warm_up_tts = originals["_warm_up_tts"]
+            app._warm_up_intermission_tts = originals["_warm_up_intermission_tts"]
+            app._warm_up_stt = originals["_warm_up_stt"]
+
+        self.assertNotIn("music.start", events)
+        self.assertIn("handler.run", events)
 
     def test_main_speaks_shutdown_message_when_session_shutdown_requested(self):
         events = []
@@ -707,10 +1093,10 @@ class VoiceApplicationTests(unittest.TestCase):
                 return self.value
 
         originals = {
-            "init_record": app.init_record,
             "build_stt": app.build_stt,
             "build_tts": app.build_tts,
             "build_music": app.build_music,
+            "_prepare_user_session": app._prepare_user_session,
             "build_intermission_runner": app.build_intermission_runner,
             "build_session_control": app.build_session_control,
             "build_session_button_controller": app.build_session_button_controller,
@@ -730,10 +1116,10 @@ class VoiceApplicationTests(unittest.TestCase):
             "_speak_shutdown_message": app._speak_shutdown_message,
         }
         try:
-            app.init_record = lambda: events.append("init_record")
             app.build_stt = lambda: "stt"
             app.build_tts = lambda: "tts"
             app.build_music = lambda: FakeMusic()
+            app._prepare_user_session = lambda *_args, **_kwargs: events.append("prepare_user_session") or "session-123"
             app.build_intermission_runner = lambda **_kwargs: events.append("intermission.build") or "intermission"
             app.build_status_monitor = lambda: FakeStatusMonitor()
             app.build_session_control = lambda **_kwargs: session
@@ -754,10 +1140,10 @@ class VoiceApplicationTests(unittest.TestCase):
 
             app.main()
         finally:
-            app.init_record = originals["init_record"]
             app.build_stt = originals["build_stt"]
             app.build_tts = originals["build_tts"]
             app.build_music = originals["build_music"]
+            app._prepare_user_session = originals["_prepare_user_session"]
             app.build_intermission_runner = originals["build_intermission_runner"]
             app.build_session_control = originals["build_session_control"]
             app.build_session_button_controller = originals["build_session_button_controller"]
