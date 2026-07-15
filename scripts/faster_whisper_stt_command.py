@@ -24,6 +24,15 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.voice.vad import build_vad, dbfs
 
+DEVICE_OPEN_ERROR_SNIPPETS = (
+    "audio open error",
+    "no such file or directory",
+    "no such device",
+    "cannot get card index",
+    "unknown pcm",
+    "device or resource busy",
+)
+
 
 def str_to_bool(value: str | bool | None) -> bool:
     if isinstance(value, bool):
@@ -85,6 +94,47 @@ def build_arecord_raw_command(
     return command
 
 
+def _capture_device_candidates(device: str) -> list[str]:
+    normalized = str(device or "").strip()
+    candidates: list[str] = []
+    if normalized:
+        candidates.append(normalized)
+    for fallback in ("default", "pulse", ""):
+        if fallback not in candidates:
+            candidates.append(fallback)
+    return candidates
+
+
+def _is_recoverable_device_error(message: str) -> bool:
+    normalized = str(message or "").strip().lower()
+    return any(snippet in normalized for snippet in DEVICE_OPEN_ERROR_SNIPPETS)
+
+
+def _report_device_retry(failed_device: str, next_device: str, error: str) -> None:
+    failed_label = failed_device or "<default>"
+    next_label = next_device or "<implicit-default>"
+    print(
+        f"arecord device {failed_label!r} failed ({error}). Retrying with {next_label!r}.",
+        file=sys.stderr,
+    )
+
+
+def _wav_is_effectively_silent(
+    wav_file: str,
+    *,
+    rms_threshold_dbfs: float = -95.0,
+    peak_threshold_dbfs: float = -95.0,
+) -> bool:
+    try:
+        metrics = analyze_wav(wav_file)
+    except Exception:
+        return False
+    return (
+        float(metrics.get("rms_dbfs", -120.0)) <= rms_threshold_dbfs
+        and float(metrics.get("peak_dbfs", -120.0)) <= peak_threshold_dbfs
+    )
+
+
 def _dbfs(audio: bytes, sample_width: int = 2) -> float:
     return dbfs(audio, sample_width=sample_width)
 
@@ -106,12 +156,28 @@ def record_wav(
     timeout_sec: int = 30,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
-    command = build_arecord_command(output_file, seconds, sample_rate, channels, device)
-    completed = runner(command, capture_output=True, text=True, timeout=timeout_sec)
-    if completed.returncode != 0:
-        raise RuntimeError((completed.stderr or "").strip() or "arecord failed.")
-    if not Path(output_file).exists() or Path(output_file).stat().st_size <= 44:
-        raise RuntimeError("Recorded WAV is empty or invalid.")
+    candidates = _capture_device_candidates(device)
+    last_error: RuntimeError | None = None
+    for index, candidate in enumerate(candidates):
+        command = build_arecord_command(output_file, seconds, sample_rate, channels, candidate)
+        completed = runner(command, capture_output=True, text=True, timeout=timeout_sec)
+        has_more_candidates = index + 1 < len(candidates)
+        if completed.returncode == 0 and Path(output_file).exists() and Path(output_file).stat().st_size > 44:
+            if has_more_candidates and _wav_is_effectively_silent(output_file):
+                _report_device_retry(candidate, candidates[index + 1], "recorded audio was silent")
+                continue
+            return
+
+        error = (completed.stderr or "").strip() or "Recorded WAV is empty or invalid."
+        last_error = RuntimeError(error)
+        if has_more_candidates and _is_recoverable_device_error(error):
+            _report_device_retry(candidate, candidates[index + 1], error)
+            continue
+        raise last_error
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Recorded WAV is empty or invalid.")
 
 
 def record_wav_auto_stop(
@@ -139,6 +205,64 @@ def record_wav_auto_stop(
     recording window after they finish answering. If no speech is detected, it
     stops early so the normal empty-transcript retry can prompt again.
     """
+    candidates = _capture_device_candidates(device)
+    last_error: RuntimeError | None = None
+    for index, candidate in enumerate(candidates):
+        try:
+            _record_wav_auto_stop_once(
+                output_file,
+                max_seconds=max_seconds,
+                sample_rate=sample_rate,
+                channels=channels,
+                device=candidate,
+                vad_detector=vad_detector,
+                vad_aggressiveness=vad_aggressiveness,
+                silence_threshold_dbfs=silence_threshold_dbfs,
+                silence_timeout_sec=silence_timeout_sec,
+                trailing_pad_sec=trailing_pad_sec,
+                min_speech_seconds=min_speech_seconds,
+                min_record_seconds=min_record_seconds,
+                no_speech_timeout_sec=no_speech_timeout_sec,
+                chunk_ms=chunk_ms,
+                popen_factory=popen_factory,
+                should_stop=should_stop,
+            )
+            has_more_candidates = index + 1 < len(candidates)
+            if has_more_candidates and _wav_is_effectively_silent(output_file):
+                _report_device_retry(candidate, candidates[index + 1], "recorded audio was silent")
+                continue
+            return
+        except RuntimeError as exc:
+            last_error = exc
+            has_more_candidates = index + 1 < len(candidates)
+            if has_more_candidates and _is_recoverable_device_error(str(exc)):
+                _report_device_retry(candidate, candidates[index + 1], str(exc))
+                continue
+            raise
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Recorded WAV is empty or invalid.")
+
+
+def _record_wav_auto_stop_once(
+    output_file: str,
+    max_seconds: float,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    device: str = "",
+    vad_detector: str = "auto",
+    vad_aggressiveness: int = 3,
+    silence_threshold_dbfs: float = -45.0,
+    silence_timeout_sec: float = 1.2,
+    trailing_pad_sec: float = 0.4,
+    min_speech_seconds: float = 0.25,
+    min_record_seconds: float = 1.0,
+    no_speech_timeout_sec: float = 5.0,
+    chunk_ms: int = 30,
+    popen_factory: Callable[..., subprocess.Popen] = subprocess.Popen,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
     command = build_arecord_raw_command(max_seconds, sample_rate, channels, device)
     process = popen_factory(
         command,

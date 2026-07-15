@@ -34,7 +34,7 @@ class VoiceIOTests(unittest.TestCase):
         )
         self.assertEqual(
             voice_io.clean_spoken_text("VALIDATION: I hear you.\n\nHow has your mood been?"),
-            "I hear you.\n\nHow has your mood been?",
+            "I hear you, and How has your mood been?",
         )
 
     def test_parse_voice_prompt_marks_system_message_no_response(self):
@@ -412,6 +412,9 @@ class VoiceIOTests(unittest.TestCase):
             def is_background(self):
                 return True
 
+            def stop(self):
+                events.append("music.stop")
+
             def start(self):
                 events.append("music.start")
 
@@ -439,9 +442,9 @@ class VoiceIOTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                "music.start",
-                "music.duck",
+                "music.stop",
                 "speak:How has your mood been?",
+                "music.start",
                 "music.duck",
                 "listen",
                 "music.restore",
@@ -791,9 +794,10 @@ class VoiceIOTests(unittest.TestCase):
                 voice_io.RECORD_CSV = original_record_csv
 
         self.assertFalse(processed)
+        self.assertIn("music.stop", events)
+        self.assertIn("music.start", events)
         self.assertIn("music.restore", events)
         self.assertNotIn("music.pause", events)
-        self.assertNotIn("music.stop", events)
 
     def test_process_voice_turn_clears_pending_question_when_override_already_active(self):
         class FakeSessionControl:
@@ -901,8 +905,14 @@ class VoiceIOTests(unittest.TestCase):
                 events.append(f"speak:{text}")
 
         class FakeMusic:
+            def is_playing(self):
+                return True
+
             def is_background(self):
                 return True
+
+            def stop(self):
+                events.append("music.stop")
 
             def start(self):
                 events.append("music.start")
@@ -931,9 +941,9 @@ class VoiceIOTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                "music.start",
-                "music.duck",
+                "music.stop",
                 "speak:Goodbye. Take care.",
+                "music.start",
                 "music.restore",
             ],
         )

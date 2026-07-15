@@ -14,7 +14,17 @@ from src.voice.music import MusicBackend
 
 logger = get_logger("VoiceIOLoop")
 MUSIC_STOP_SETTLE_SEC = 0.15
+SPOKEN_CHUNK_GAP_SEC = 0.55
 _SPOKEN_LABEL_RE = re.compile(r"(?im)^\s*(guide|validation)\s*:\s*")
+_SPOKEN_PARAGRAPH_BREAK_RE = re.compile(r"\s*\n\s*\n+\s*")
+_SPOKEN_PARAGRAPH_TOKEN = "__CAITI_PARAGRAPH_BREAK__"
+_SPOKEN_SOFT_BOUNDARY_PATTERNS = [
+    (re.compile(r"\.\s+(Let's)\b"), r", \1"),
+    (re.compile(r"\.\s+(Thank you)\b"), r", \1"),
+    (re.compile(r"\.\s+(Can you|Could you|Would you)\b"), r", \1"),
+    (re.compile(r"\.\s+(How|What|When|Where|Why)\b"), r", and \1"),
+    (re.compile(r"\.\s+(Have you|Are you|Do you|Did you)\b"), r", and \1"),
+]
 
 
 def _read_record() -> pd.DataFrame:
@@ -66,6 +76,17 @@ def _music_is_background(music: Optional[MusicBackend]) -> bool:
         return False
 
 
+def _music_is_playing(music: Optional[MusicBackend]) -> bool:
+    method = getattr(music, "is_playing", None)
+    if not callable(method):
+        return False
+    try:
+        return bool(method())
+    except Exception as exc:
+        logger.warning("Music playing-state check failed: %s", exc)
+        return False
+
+
 def _start_music(music: Optional[MusicBackend]) -> None:
     method = getattr(music, "start", None)
     if callable(method):
@@ -90,6 +111,24 @@ def _restore_music_volume(music: Optional[MusicBackend]) -> None:
     method = getattr(music, "restore_volume", None)
     if callable(method):
         method()
+
+
+def _suspend_music_for_spoken_audio(music: Optional[MusicBackend]) -> None:
+    if music is None:
+        return
+    if _music_is_background(music):
+        _stop_music(music)
+        time.sleep(MUSIC_STOP_SETTLE_SEC)
+        return
+    _stop_music(music)
+    time.sleep(MUSIC_STOP_SETTLE_SEC)
+
+
+def _prepare_background_music_for_listening(music: Optional[MusicBackend]) -> None:
+    if not _music_is_background(music):
+        return
+    _start_music(music)
+    _duck_music(music)
 
 
 def _session_should_interrupt(session_control=None) -> bool:
@@ -251,6 +290,36 @@ def _speak_stream_with_status(tts: TTSBackend, text: str, status_leds=None, shou
     )
 
 
+def _sleep_interruptibly(duration_sec: float, should_interrupt=None, poll_interval_sec: float = 0.05) -> None:
+    deadline = time.monotonic() + max(0.0, float(duration_sec))
+    while time.monotonic() < deadline:
+        _raise_if_interrupted(should_interrupt)
+        time.sleep(min(poll_interval_sec, max(0.0, deadline - time.monotonic())))
+
+
+def split_spoken_chunks(text: str) -> list[str]:
+    raw = str(text or "")
+    parts = [part for part in _SPOKEN_PARAGRAPH_BREAK_RE.split(raw) if str(part or "").strip()]
+    if not parts:
+        cleaned = clean_spoken_text(raw)
+        return [cleaned] if cleaned else []
+    chunks = [clean_spoken_text(part) for part in parts]
+    return [chunk for chunk in chunks if chunk]
+
+
+def _speak_stream_chunks_with_status(
+    tts: TTSBackend,
+    chunks: list[str],
+    status_leds=None,
+    should_interrupt=None,
+    gap_sec: float = SPOKEN_CHUNK_GAP_SEC,
+) -> None:
+    for index, chunk in enumerate(chunks):
+        _speak_stream_with_status(tts, chunk, status_leds, should_interrupt=should_interrupt)
+        if index < len(chunks) - 1:
+            _sleep_interruptibly(gap_sec, should_interrupt=should_interrupt)
+
+
 def _collect_transcript(
     stt: STTBackend,
     tts: TTSBackend,
@@ -263,7 +332,7 @@ def _collect_transcript(
     while True:
         _raise_if_interrupted(should_interrupt)
         if _music_is_background(music):
-            _duck_music(music)
+            _prepare_background_music_for_listening(music)
         _set_led_status(status_leds, "set_stt_active", True)
         listen_started = time.monotonic()
         try:
@@ -290,21 +359,30 @@ def _collect_transcript(
             _stop_music(music)
             time.sleep(MUSIC_STOP_SETTLE_SEC)
         if _music_is_background(music):
-            _duck_music(music)
-        try:
-            _speak_chunk_with_status(
-                tts,
-                "I didn't catch that. Please say your answer again.",
-                status_leds,
-                should_interrupt=should_interrupt,
-            )
-        finally:
-            if _music_is_background(music):
-                _restore_music_volume(music)
+            _suspend_music_for_spoken_audio(music)
+        _speak_chunk_with_status(
+            tts,
+            "I didn't catch that. Please say your answer again.",
+            status_leds,
+            should_interrupt=should_interrupt,
+        )
 
 
 def clean_spoken_text(text: str) -> str:
-    return _SPOKEN_LABEL_RE.sub("", str(text or "")).strip()
+    cleaned = _SPOKEN_LABEL_RE.sub("", str(text or "")).strip()
+    cleaned = _SPOKEN_PARAGRAPH_BREAK_RE.sub(f" {_SPOKEN_PARAGRAPH_TOKEN} ", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    for pattern, replacement in _SPOKEN_SOFT_BOUNDARY_PATTERNS:
+        cleaned = pattern.sub(replacement, cleaned)
+    cleaned = re.sub(rf"\.\s*{_SPOKEN_PARAGRAPH_TOKEN}\s*", f" {_SPOKEN_PARAGRAPH_TOKEN} ", cleaned)
+    cleaned = re.sub(
+        rf"{_SPOKEN_PARAGRAPH_TOKEN}\s+(How|What|When|Where|Why|Have you|Are you|Do you|Did you|Can you|Could you|Would you)\b",
+        r", and \1",
+        cleaned,
+    )
+    cleaned = re.sub(rf"\s*{_SPOKEN_PARAGRAPH_TOKEN}\s*", ", ", cleaned)
+    cleaned = re.sub(r"\s+([,.;?!])", r"\1", cleaned)
+    return cleaned.strip()
 
 
 def parse_voice_prompt(text: str) -> tuple[str, bool]:
@@ -357,25 +435,21 @@ def process_voice_turn(
     should_interrupt = (lambda: _session_should_interrupt(session_control)) if session_control is not None else None
     _set_interrupt_check(tts, should_interrupt)
     _set_interrupt_check(stt, should_interrupt)
+    background_music_was_playing = _music_is_background(music) and _music_is_playing(music)
     try:
         if music is not None:
-            if _music_is_background(music):
-                _start_music(music)
-                _duck_music(music)
-            else:
-                _stop_music(music)
-                time.sleep(MUSIC_STOP_SETTLE_SEC)
+            _suspend_music_for_spoken_audio(music)
 
         question = original_question
         spoken_question, expects_response = parse_voice_prompt(question)
-        spoken_question = clean_spoken_text(spoken_question)
-
+        spoken_chunks = split_spoken_chunks(spoken_question)
         logger.info(
-            "Speaking question/response length=%s expects_response=%s",
+            "Speaking question/response length=%s expects_response=%s spoken_chunks=%s",
             len(question),
             expects_response,
+            len(spoken_chunks),
         )
-        _speak_stream_with_status(tts, spoken_question, status_leds, should_interrupt=should_interrupt)
+        _speak_stream_chunks_with_status(tts, spoken_chunks, status_leds, should_interrupt=should_interrupt)
 
         if expects_response:
             transcript, listen_duration_sec = _collect_transcript(
@@ -402,7 +476,8 @@ def process_voice_turn(
             if music is not None:
                 _start_music(music)
         else:
-            if _music_is_background(music):
+            if background_music_was_playing:
+                _start_music(music)
                 _restore_music_volume(music)
             with RECORD_LOCK:
                 df = _read_record()
@@ -430,6 +505,7 @@ def process_voice_turn(
         if music is not None:
             if _music_is_background(music):
                 if _should_keep_music_on_interrupted_voice_turn(session_control):
+                    _start_music(music)
                     _restore_music_volume(music)
                 else:
                     pause_method = getattr(music, "pause", None)

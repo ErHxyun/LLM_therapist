@@ -61,6 +61,7 @@ class PersistentPiperTTS:
                 piper_tts_command.validate_piper_voice(self.model_path)
                 self._voice = PiperVoice.load(self.model_path, use_cuda=self.use_cuda)
                 logger.info("Persistent Piper voice model ready: %s", self.model_path)
+                logger.info("Persistent Piper playback player configured: %s", self.player)
         return self._voice
 
     def speak(self, text: str) -> None:

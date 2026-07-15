@@ -111,7 +111,8 @@ class FasterWhisperSTT:
             raise VoiceInterrupted("STT interrupted before recording.")
         started_at = time.monotonic()
         logger.info(
-            "STT recording started auto_stop=%s vad=%s max=%.2fs silence=%.2fs trailing=%.2fs no_speech=%.2fs",
+            "STT recording started device=%s auto_stop=%s vad=%s max=%.2fs silence=%.2fs trailing=%.2fs no_speech=%.2fs",
+            self.audio_device or "<implicit-default>",
             self.auto_stop,
             self.vad_detector,
             self.record_seconds,
@@ -169,6 +170,13 @@ class FasterWhisperSTT:
             raise VoiceInterrupted("STT interrupted after transcription.")
         transcript = transcript.strip()
         self.last_timing["transcript_length"] = len(transcript)
+        if not transcript:
+            logger.info(
+                "STT empty transcript audio summary duration=%.2fs rms=%.1fdBFS peak=%.1fdBFS",
+                self.last_audio_duration_sec,
+                metrics.get("rms_dbfs", -120.0),
+                metrics.get("peak_dbfs", -120.0),
+            )
         logger.info(
             "Persistent STT produced transcript length=%s transcribe_duration=%.3fs",
             len(transcript),

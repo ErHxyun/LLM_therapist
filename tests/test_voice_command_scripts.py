@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import wave
 import struct
+import math
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
@@ -29,14 +30,17 @@ class _ChunkStdout:
 
 
 class _ChunkStderr:
+    def __init__(self, payload: bytes = b""):
+        self.payload = payload
+
     def read(self):
-        return b""
+        return self.payload
 
 
 class _FakePopen:
-    def __init__(self, chunks):
+    def __init__(self, chunks, stderr: bytes = b""):
         self.stdout = _ChunkStdout(chunks)
-        self.stderr = _ChunkStderr()
+        self.stderr = _ChunkStderr(stderr)
         self.terminated = False
         self.killed = False
 
@@ -56,6 +60,14 @@ class _FakePopen:
 
 def _pcm_chunk(value: int, samples: int = 100) -> bytes:
     return struct.pack("<h", value) * samples
+
+
+def _write_test_wav(path: Path, sample_value: int, frames: int = 1600, sample_rate: int = 16000) -> None:
+    with wave.open(str(path), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(sample_rate)
+        writer.writeframes(struct.pack("<h", sample_value) * frames)
 
 
 class VoiceCommandScriptTests(unittest.TestCase):
@@ -79,6 +91,47 @@ class VoiceCommandScriptTests(unittest.TestCase):
     def test_player_command_defaults_aplay_quiet(self):
         self.assertEqual(tts_script.build_player_command("aplay", "/tmp/out.wav"), ["aplay", "-q", "/tmp/out.wav"])
         self.assertEqual(tts_script.build_player_command("paplay", "/tmp/out.wav"), ["paplay", "/tmp/out.wav"])
+        self.assertEqual(
+            tts_script.build_player_command("aplay -D plughw:3,0 -q", "/tmp/out.wav"),
+            ["aplay", "-D", "plughw:3,0", "-q", "/tmp/out.wav"],
+        )
+
+    def test_normalize_speech_text_collapses_blank_lines(self):
+        self.assertEqual(
+            tts_script.normalize_speech_text("Hello there.\n\nHow are you today?\n"),
+            "Hello there. How are you today?",
+        )
+
+    def test_prepare_aplay_wav_converts_to_48k_stereo(self):
+        try:
+            import numpy as np
+            import soundfile  # noqa: F401
+            import scipy.signal  # noqa: F401
+        except Exception:
+            self.skipTest("audio conversion dependencies are unavailable")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "mono.wav"
+            rate = 22050
+            duration_sec = 0.2
+            frames = int(rate * duration_sec)
+            with wave.open(str(source), "wb") as writer:
+                writer.setnchannels(1)
+                writer.setsampwidth(2)
+                writer.setframerate(rate)
+                samples = bytearray()
+                for index in range(frames):
+                    value = int(12000 * math.sin((2 * math.pi * 440 * index) / rate))
+                    samples.extend(struct.pack("<h", value))
+                writer.writeframes(bytes(samples))
+
+            converted = tts_script._prepare_aplay_wav(str(source))
+            self.assertNotEqual(converted, str(source))
+            with wave.open(converted, "rb") as reader:
+                self.assertEqual(reader.getframerate(), 48000)
+                self.assertEqual(reader.getnchannels(), 2)
+
+            Path(converted).unlink(missing_ok=True)
 
     def test_piper_speak_runs_piper_then_player(self):
         calls = []
@@ -297,6 +350,117 @@ class VoiceCommandScriptTests(unittest.TestCase):
                 seconds=1,
                 runner=runner,
             )
+
+    def test_record_wav_retries_with_default_when_configured_device_is_missing(self):
+        calls = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wav_path = Path(tmpdir) / "input.wav"
+
+            def runner(command, **kwargs):
+                calls.append(command)
+                if "-D" in command and command[command.index("-D") + 1] == "plughw:0,0":
+                    return _Completed(returncode=1, stderr="arecord: main:831: audio open error: No such file or directory")
+                wav_path.write_bytes(b"RIFF" + b"0" * 80)
+                return _Completed()
+
+            stt_script.record_wav(
+                str(wav_path),
+                seconds=1,
+                device="plughw:0,0",
+                runner=runner,
+            )
+
+        self.assertEqual(calls[0][calls[0].index("-D") + 1], "plughw:0,0")
+        self.assertEqual(calls[1][calls[1].index("-D") + 1], "default")
+
+    def test_record_wav_retries_with_default_when_first_device_captures_silence(self):
+        calls = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wav_path = Path(tmpdir) / "input.wav"
+
+            def runner(command, **kwargs):
+                calls.append(command)
+                device = command[command.index("-D") + 1] if "-D" in command else ""
+                if device == "pulse":
+                    _write_test_wav(wav_path, 0)
+                else:
+                    _write_test_wav(wav_path, 1000)
+                return _Completed()
+
+            stt_script.record_wav(
+                str(wav_path),
+                seconds=1,
+                device="pulse",
+                runner=runner,
+            )
+
+        self.assertEqual(calls[0][calls[0].index("-D") + 1], "pulse")
+        self.assertEqual(calls[1][calls[1].index("-D") + 1], "default")
+
+    def test_auto_stop_retries_with_default_when_configured_device_is_missing(self):
+        calls = []
+
+        def popen_factory(command, **_kwargs):
+            calls.append(command)
+            if "-D" in command and command[command.index("-D") + 1] == "plughw:0,0":
+                return _FakePopen([], stderr=b"arecord: main:831: audio open error: No such file or directory")
+            return _FakePopen([_pcm_chunk(8000), _pcm_chunk(8000), _pcm_chunk(0), _pcm_chunk(0), _pcm_chunk(0)])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wav_path = Path(tmpdir) / "auto.wav"
+            stt_script.record_wav_auto_stop(
+                str(wav_path),
+                max_seconds=10,
+                sample_rate=1000,
+                channels=1,
+                device="plughw:0,0",
+                vad_detector="energy",
+                silence_threshold_dbfs=-45,
+                silence_timeout_sec=0.2,
+                trailing_pad_sec=0.1,
+                min_speech_seconds=0.1,
+                min_record_seconds=0.1,
+                no_speech_timeout_sec=1.0,
+                chunk_ms=100,
+                popen_factory=popen_factory,
+            )
+
+        self.assertEqual(calls[0][calls[0].index("-D") + 1], "plughw:0,0")
+        self.assertEqual(calls[1][calls[1].index("-D") + 1], "default")
+
+    def test_auto_stop_retries_with_default_when_first_device_captures_silence(self):
+        calls = []
+
+        def popen_factory(command, **_kwargs):
+            calls.append(command)
+            device = command[command.index("-D") + 1] if "-D" in command else ""
+            if device == "pulse":
+                return _FakePopen([_pcm_chunk(0), _pcm_chunk(0), _pcm_chunk(0), _pcm_chunk(0), _pcm_chunk(0)])
+            return _FakePopen([_pcm_chunk(8000), _pcm_chunk(8000), _pcm_chunk(0), _pcm_chunk(0), _pcm_chunk(0)])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wav_path = Path(tmpdir) / "auto.wav"
+            stt_script.record_wav_auto_stop(
+                str(wav_path),
+                max_seconds=10,
+                sample_rate=1000,
+                channels=1,
+                device="pulse",
+                vad_detector="energy",
+                silence_threshold_dbfs=-45,
+                silence_timeout_sec=0.2,
+                trailing_pad_sec=0.1,
+                min_speech_seconds=0.1,
+                min_record_seconds=0.1,
+                no_speech_timeout_sec=1.0,
+                chunk_ms=100,
+                popen_factory=popen_factory,
+            )
+
+        self.assertEqual(calls[0][calls[0].index("-D") + 1], "pulse")
+        self.assertEqual(calls[1][calls[1].index("-D") + 1], "default")
 
     def test_smoke_test_command_option_parses_space_and_equals_forms(self):
         self.assertEqual(

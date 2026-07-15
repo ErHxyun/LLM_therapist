@@ -110,8 +110,14 @@ def check_configuration() -> list[str]:
         failures.append("arecord is not available, but STT needs microphone recording.")
 
     player = command_option(VOICE_TTS_COMMAND, "--player")
-    if player and shutil.which(player) is None:
-        failures.append(f"Audio player is not available: {player}")
+    if player:
+        try:
+            player_parts = shlex.split(player)
+        except ValueError:
+            player_parts = [player]
+        player_executable = player_parts[0] if player_parts else player
+        if player_executable and shutil.which(player_executable) is None:
+            failures.append(f"Audio player is not available: {player}")
 
     piper_executable = command_option(VOICE_TTS_COMMAND, "--executable") or "piper"
     if tts_backend == "command" and VOICE_TTS_COMMAND and "piper_tts_command.py" in VOICE_TTS_COMMAND and shutil.which(piper_executable) is None:
