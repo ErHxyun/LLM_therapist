@@ -11,6 +11,10 @@ data/logs
 data/emotion/
 data/record.csv
 data/phq_gad_results.json
+
+# Participant/session data and generated sample audio stay local.
+data/users/
+data/samples/
 data/q_tables/item_qtable_*.csv
 data/libs/question_lib_v4_[0-9]*.json
 data/libs/question_lib_v4_*_[0-9]*.json
