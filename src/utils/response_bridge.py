@@ -27,6 +27,43 @@ _EXPLICIT_STOP_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+_FAMILY_SUPPORT_CUE = re.compile(
+    r"\b(family|families|relative|relatives|parent|parents|mother|mom|father|dad|"
+    r"sibling|siblings|brother|brothers|sister|sisters|spouse|husband|wife|"
+    r"child|children|son|sons|daughter|daughters|aunt|uncle|cousin|"
+    r"grandparent|grandparents|grandmother|grandfather)\b",
+    re.IGNORECASE,
+)
+_SOCIAL_SUPPORT_CUE = re.compile(
+    r"\b(friend|friends|friendship|friendships|classmate|classmates|coworker|"
+    r"coworkers|co-worker|co-workers|colleague|colleagues|neighbor|neighbors|"
+    r"neighbour|neighbours|roommate|roommates|peer|peers|buddy|buddies)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_DIMENSION_CUE = re.compile(
+    r"\b(weight|pounds?|mood|depress(?:ed|ion)?|anxi(?:ous|ety)|sad|happy|"
+    r"medications?|medicine|meds|pills?|prescriptions?|prescribed|dose|doctor|"
+    r"therapist|psychiatrist|provider|clinic|appointments?|medical|housework|"
+    r"chores?|cleaning|laundry|talk|talking|communicat(?:e|ion)|emotions?|"
+    r"expressing|safe|safety|unsafe|risk|risky|sleep|slept|sleeping|insomnia|"
+    r"bedtime|eat|eating|meals?|breakfast|lunch|dinner|appetite|work|job|school|"
+    r"classes?|study|vacation|day off|time off|attend|attendance|absent|"
+    r"obligation|commitment|finance|financial|money|bills?|debt|budget|nutrition|"
+    r"diet|vegetables?|protein|problems?|solve|solving|decisions?|family|"
+    r"relatives?|parents?|mother|mom|father|dad|siblings?|brothers?|sisters?|"
+    r"spouse|husband|wife|children?|sons?|daughters?|alcohol|beer|wine|drinking|"
+    r"cigarettes?|smoke|smoking|tobacco|nicotine|vape|vaping|drugs?|substances?|"
+    r"cannabis|marijuana|cocaine|opioid|heroin|meth|hobbies?|leisure|creative|"
+    r"creativity|art|drawing|painting|music|community|neighborhood|volunteer|"
+    r"friends?|friendships?|classmates?|coworkers?|co-workers?|colleagues?|"
+    r"neighbors?|neighbours?|roommates?|peers?|partner|intimate|boundaries?|"
+    r"relationships?|sexual|sex|condom|protection|productive|productivity|tasks?|"
+    r"deadlines?|motivation|motivated|coping|cope|stress|stressed|calm|relax|"
+    r"self-harm|suicide|hurt myself|cutting|police|arrest|arrested|law enforcement|"
+    r"jail|legal|court|lawyer|attorney|probation|hygiene|shower|teeth|skincare|"
+    r"exercise|exercising|gym|running|sports?|physical activity)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize_general_text(text: str) -> str:
@@ -38,6 +75,42 @@ def _normalize_general_text(text: str) -> str:
 
 def _strip_outer_punctuation(text: str) -> str:
     return re.sub(r"^[\W_]+|[\W_]+$", "", text).strip()
+
+
+def _reconcile_support_dimension(
+    model_dimension: str,
+    user_input: str,
+    current_dimension: str,
+) -> tuple[str, str | None]:
+    """Disambiguate family versus non-family support without hiding other domains."""
+    predicted = str(model_dimension or "").strip().lower()
+    current = str(current_dimension or "").strip().lower()
+    support_dimensions = {"family_support", "social_support"}
+    if predicted not in support_dimensions:
+        return predicted, None
+
+    text = _normalize_general_text(user_input)
+    has_family_cue = bool(_FAMILY_SUPPORT_CUE.search(text))
+    has_social_cue = bool(_SOCIAL_SUPPORT_CUE.search(text))
+    resolved = predicted
+    reason = None
+    if has_social_cue and not has_family_cue:
+        resolved = "social_support"
+        reason = "explicit_non_family_relationship"
+    elif has_family_cue and not has_social_cue:
+        resolved = "family_support"
+        reason = "explicit_family_relationship"
+    elif current in support_dimensions and predicted != current:
+        resolved = current
+        reason = "ambiguous_support_uses_current_question"
+
+    if resolved == predicted:
+        return predicted, None
+    return resolved, reason
+
+
+def _has_explicit_dimension_evidence(user_input: str) -> bool:
+    return bool(_EXPLICIT_DIMENSION_CUE.search(_normalize_general_text(user_input)))
 
 
 def _contextual_general_label(user_input: str, dimension_label: str) -> str | None:
@@ -241,6 +314,19 @@ def _task1_dimension_result(
     source: str,
     dimension_label: str,
 ):
+    model_dimension = dim
+    dim, support_reconciliation = _reconcile_support_dimension(
+        dim,
+        user_input,
+        dimension_label,
+    )
+    if support_reconciliation:
+        logger.info(
+            "Reconciled Task 1 support dimension %s to %s (%s).",
+            model_dimension,
+            dim,
+            support_reconciliation,
+        )
     log_llm_event(
         task=LLMTask.TASK1_RESPONSE_ANALYZER,
         dimension=dim,
@@ -253,6 +339,8 @@ def _task1_dimension_result(
             "source": source,
             "current_dimension": dimension_label,
             "cross_dimension": str(dim).strip().lower() != str(dimension_label).strip().lower(),
+            "model_dimension": model_dimension,
+            "support_reconciliation": support_reconciliation,
         },
     )
     return dim, score
@@ -373,7 +461,14 @@ def get_openai_resp(user_input, original_question, dimension_label: str, metrics
         # Use the response analyzer to try to classify the input
         call_metrics["analyzer_call_count"] += 1
         call_metrics["source"] = "task1"
-        contract = classify_dimension_and_score_result(user_input, original_question)
+        has_dimension_evidence = _has_explicit_dimension_evidence(user_input)
+        task1_question = "" if has_dimension_evidence else original_question
+        call_metrics["context_mode"] = (
+            "isolated_explicit_dimension"
+            if has_dimension_evidence
+            else "question_context_for_elliptical_answer"
+        )
+        contract = classify_dimension_and_score_result(user_input, task1_question)
         raw = contract.raw_output
         # Take just the first line (in case of multi-line output)
         first = str(raw).strip().splitlines()[0].strip()

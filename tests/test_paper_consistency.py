@@ -92,6 +92,27 @@ class PaperConsistencyTest(unittest.TestCase):
         self.assertEqual(labels, EXPECTED_DIMENSION_LABELS)
         self.assertEqual(len(set(labels)), 37)
 
+    def test_staged_screening_covers_all_37_dimensions_once(self):
+        self.assertTrue(config_loader.STAGED_SCREENING_ENABLED)
+        stages = config_loader.STAGED_SCREENING_STAGES
+        flattened = [
+            label
+            for stage in stages
+            for label in stage["dimensions"]
+        ]
+
+        self.assertEqual(len(stages), 5)
+        self.assertEqual(len(flattened), 37)
+        self.assertEqual(len(set(flattened)), 37)
+        self.assertEqual(set(flattened), set(EXPECTED_DIMENSION_LABELS))
+        self.assertTrue(all(str(stage.get("intro", "")).strip() for stage in stages))
+        self.assertIn("daily routine", stages[0]["intro"].lower())
+        social_stage = next(
+            stage for stage in stages if stage["name"] == "interests_and_social_connection"
+        )
+        self.assertIn("social", social_stage["dimensions"])
+        self.assertIn("social_support", social_stage["dimensions"])
+
     def test_legacy_support_labels_migrate_without_losing_saved_data(self):
         legacy = {
             "18": {

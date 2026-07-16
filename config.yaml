@@ -24,6 +24,28 @@ rl:
   
   item_importance: [0, 5, 5, 5, 5, 4, 4, 4, 2, 2, 5, 5, 5, 5, 5, 2, 2, 1, 3, 3, 4, 4, 4, 3, 3, 1, 4, 2, 2, 2, 4, 4, 3, 1, 1, 1, 4, 4, 0]
   number_questions: [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0]
+
+  # Stages constrain only the actions available to the existing epsilon-greedy
+  # selector. Q-values, rewards, learning updates, and question variants stay
+  # unchanged. Within each stage, the existing RL policy chooses the next item.
+  staged_screening:
+    enabled: true
+    stages:
+      - name: daily_life
+        dimensions: [sleep, eat, nutrition, hygiene, sports, house, weight]
+        intro: "To begin, I'd like to ask a few questions about your daily routine and how things have been going recently."
+      - name: work_and_functioning
+        dimensions: [work, work_dayoff, showup, productivity, work_motivation, finance, problem]
+        intro: "Next, I'd like to ask a few questions about work, school, and other responsibilities."
+      - name: interests_and_social_connection
+        dimensions: [hobbies, creativity, community, talk, social, social_support]
+        intro: "I'd also like to learn a little about your interests and social connections."
+      - name: relationships_emotion_and_care
+        dimensions: [family, family_support, emo, comfortable, coping, mood, care, medication]
+        intro: "Next, I'd like to check in about relationships, emotions, and support."
+      - name: sensitive_and_safety
+        dimensions: [alcohol, ciga, drug, protection, arrest, legal, safe, risk, sib]
+        intro: "I have a few more personal questions. You can let me know if anything feels uncomfortable."
  
 local_llm:
   model_id: "xxue752/caiti_best_model"

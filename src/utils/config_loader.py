@@ -49,6 +49,12 @@ ALPHA = float(RL["alpha"])
 GAMMA = float(RL["gamma"])
 ITEM_IMPORTANCE = RL["item_importance"]
 NUMBER_QUESTIONS = RL["number_questions"]
+STAGED_SCREENING = RL.get("staged_screening", {})
+STAGED_SCREENING_ENABLED = _bool_env(
+    "CAITI_STAGED_SCREENING_ENABLED",
+    STAGED_SCREENING.get("enabled", False),
+)
+STAGED_SCREENING_STAGES = STAGED_SCREENING.get("stages", [])
 
 LOCAL_LLM_MODEL_ID = os.environ.get(
     "CAITI_MODEL_ID",

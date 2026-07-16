@@ -8,6 +8,7 @@ import pandas as pd
 from src.questioner import (
     QuestionTurnOutcome,
     ask_question,
+    append_pending_next_question_intro,
     pop_pending_validation_for_workflow_transition,
 )
 from src.CBT import run_cbt
@@ -22,6 +23,8 @@ from src.utils.config_loader import (
     RESULT_DIR,
     REPORT_FILE,
     NOTES_FILE,
+    STAGED_SCREENING_ENABLED,
+    STAGED_SCREENING_STAGES,
 )
 from src.utils.config_loader import RECORD_CSV
 from src.utils.io_question_lib import load_question_lib, save_question_lib, generate_results
@@ -46,8 +49,7 @@ from src.utils.llm_client import llm_complete
 logger = get_logger("HandlerRL")
 
 OPENING_GREETING = (
-    "Hello, I am Caiti, your AI therapist. Thank you for joining me today. "
-    "Let's get started with a couple of questions about your recent daily life."
+    "Hello, I am Caiti, your AI therapist. Thank you for joining me today."
 )
 
 class HandlerRL:
@@ -68,6 +70,7 @@ class HandlerRL:
         self.item_q_table = None
         # Action id -> label mapping for logging readability
         self.item_action_labels = {}
+        self.screening_stages: list[dict[str, Any]] = []
         self.session_control = session_control or NullSessionControl()
         self.run_id = make_run_id(SUBJECT_ID)
         self.rl_trace_records = []
@@ -106,6 +109,7 @@ class HandlerRL:
         self.item_action_labels = {"0": "START", str(ITEM_N_STATES - 1): "END"}
         for i in range(1, dimension_count + 1):
             self.item_action_labels[str(i)] = self.question_lib[str(i)]["1"]["label"]
+        self.screening_stages = self._resolve_screening_stages()
   
         # Load persistent Q tables (if exist)
         qdir = os.path.join(DATA_DIR, "q_tables")
@@ -130,6 +134,109 @@ class HandlerRL:
             logger.info(f"Item Q table for subject {SUBJECT_ID} not found at {qfile}. ")
         
         logger.info("RL handler setup complete.")
+
+    def _resolve_screening_stages(self) -> list[dict[str, Any]]:
+        """Resolve configured dimension labels to item ids and validate full coverage."""
+        if not STAGED_SCREENING_ENABLED:
+            logger.info("Staged screening is disabled; RL may select from all remaining dimensions.")
+            return []
+        if not isinstance(STAGED_SCREENING_STAGES, list) or not STAGED_SCREENING_STAGES:
+            raise ValueError(
+                "rl.staged_screening.enabled is true, but no screening stages are configured"
+            )
+
+        label_to_item: dict[str, int] = {}
+        for item_index in range(1, len(self.question_lib) + 1):
+            label = str(
+                self.question_lib.get(str(item_index), {}).get("1", {}).get("label", "")
+            ).strip()
+            if not label:
+                raise ValueError(f"Question item {item_index} has no dimension label")
+            if label in label_to_item:
+                raise ValueError(f"Duplicate question-library dimension label: {label}")
+            label_to_item[label] = item_index
+
+        resolved: list[dict[str, Any]] = []
+        seen_labels: set[str] = set()
+        seen_names: set[str] = set()
+        for stage_position, raw_stage in enumerate(STAGED_SCREENING_STAGES, start=1):
+            if not isinstance(raw_stage, dict):
+                raise ValueError(f"Screening stage {stage_position} must be a mapping")
+            stage_name = str(raw_stage.get("name", "")).strip()
+            stage_intro = str(raw_stage.get("intro", "")).strip()
+            dimensions = raw_stage.get("dimensions", [])
+            if not stage_name:
+                raise ValueError(f"Screening stage {stage_position} has no name")
+            if not stage_intro:
+                raise ValueError(f"Screening stage {stage_name} has no intro")
+            if stage_name in seen_names:
+                raise ValueError(f"Duplicate screening stage name: {stage_name}")
+            if not isinstance(dimensions, list) or not dimensions:
+                raise ValueError(f"Screening stage {stage_name} has no dimensions")
+
+            item_ids: list[int] = []
+            normalized_labels: list[str] = []
+            for raw_label in dimensions:
+                label = str(raw_label).strip()
+                if label not in label_to_item:
+                    raise ValueError(
+                        f"Unknown dimension {label!r} in screening stage {stage_name}"
+                    )
+                if label in seen_labels:
+                    raise ValueError(
+                        f"Dimension {label!r} appears in more than one screening stage"
+                    )
+                seen_labels.add(label)
+                normalized_labels.append(label)
+                item_ids.append(label_to_item[label])
+
+            seen_names.add(stage_name)
+            resolved.append(
+                {
+                    "name": stage_name,
+                    "labels": normalized_labels,
+                    "intro": stage_intro,
+                    "item_ids": item_ids,
+                }
+            )
+
+        missing_labels = sorted(set(label_to_item) - seen_labels)
+        if missing_labels:
+            raise ValueError(
+                "Staged screening does not cover every question-library dimension: "
+                + ", ".join(missing_labels)
+            )
+
+        logger.info(
+            "Resolved %s screening stages covering %s dimensions.",
+            len(resolved),
+            len(seen_labels),
+        )
+        return resolved
+
+    def _active_stage_mask(
+        self,
+        item_mask: list[int],
+    ) -> tuple[list[int], int | None, str]:
+        """Limit available actions to the earliest stage with unanswered dimensions."""
+        if not self.screening_stages:
+            return list(item_mask), None, ""
+
+        for stage_index, stage in enumerate(self.screening_stages):
+            active_item_ids = [
+                item_id
+                for item_id in stage["item_ids"]
+                if 0 < item_id < len(item_mask) - 1 and item_mask[item_id] == 1
+            ]
+            if active_item_ids:
+                stage_mask = [0] * len(item_mask)
+                for item_id in active_item_ids:
+                    stage_mask[item_id] = 1
+                return stage_mask, stage_index, str(stage["name"])
+
+        if sum(item_mask):
+            raise RuntimeError("Unanswered dimensions exist outside the configured screening stages")
+        return list(item_mask), None, ""
 
     def _item_is_answered(self, item_index: int) -> bool:
         entry = self.question_lib.get(str(item_index), {}).get("1", {})
@@ -247,6 +354,7 @@ class HandlerRL:
         # Mask for available actions: START and END are states, not screening dimensions to ask.
         # On restart/resume, any dimension with a saved score is treated as already completed.
         item_mask = self._build_item_mask(dimension_count)
+        active_stage_index: int | None = None
         while not is_terminated:
             control_action = self.session_control.checkpoint("screening")
             if control_action == "skip_to_cbt":
@@ -258,8 +366,29 @@ class HandlerRL:
                 is_terminated = True
                 logger.info("All items have been asked. Proceeding to CBT.")
                 break
-            # Select an item to ask about using RL policy
-            A = choose_action(S, active_q_table, item_mask, ITEM_N_STATES, self.item_actions, self.item_action_labels)
+            # Staging changes only the eligible actions. The existing Q-values,
+            # epsilon-greedy policy, rewards, and update rule remain untouched.
+            selection_mask, stage_index, stage_name = self._active_stage_mask(item_mask)
+            if stage_index is not None and stage_index != active_stage_index:
+                logger.info(
+                    "Entering screening stage %s/%s: %s",
+                    stage_index + 1,
+                    len(self.screening_stages),
+                    stage_name,
+                )
+                active_stage_index = stage_index
+                stage_intro = str(self.screening_stages[stage_index].get("intro", "")).strip()
+                if stage_intro:
+                    append_pending_next_question_intro(stage_intro)
+                    logger.info("Queued screening stage intro: %s", stage_name)
+            A = choose_action(
+                S,
+                active_q_table,
+                selection_mask,
+                ITEM_N_STATES,
+                self.item_actions,
+                self.item_action_labels,
+            )
             if int(A) < 1 or int(A) > dimension_count:
                 is_terminated = True
                 logger.info("RL selected non-screening state %s. Proceeding to CBT.", A)
@@ -304,6 +433,8 @@ class HandlerRL:
                 "State": S,
                 "Action": A,
                 "NextState": S_,
+                "ScreeningStageIndex": stage_index + 1 if stage_index is not None else "",
+                "ScreeningStage": stage_name,
                 "Dimension": self.item_action_labels.get(str(A), str(A)),
                 "Question": primary_turn.get("Original_question", ""),
                 "UserResponse": primary_turn.get("User_input", ""),
@@ -329,6 +460,8 @@ class HandlerRL:
                 turn_record["QBefore"] = q_predict
                 turn_record["QAfter"] = q_after
                 turn_record["NextState"] = S_
+                turn_record["ScreeningStageIndex"] = stage_index + 1 if stage_index is not None else ""
+                turn_record["ScreeningStage"] = stage_name
             logger.debug(
                 f"Q update applied at action: Q(S={S},A={A}) {q_predict} -> {q_after} (target={q_target})"
             )

@@ -19,6 +19,58 @@ class HandlerRLRestartMaskTest(unittest.TestCase):
 
         self.assertEqual(mask, [0, 0, 1, 0, 1, 0])
 
+    def test_active_stage_mask_limits_rl_to_earliest_unfinished_stage(self):
+        handler = HandlerRL()
+        handler.screening_stages = [
+            {"name": "daily_life", "item_ids": [1, 2]},
+            {"name": "social", "item_ids": [3, 4]},
+        ]
+        item_mask = [0, 1, 1, 1, 1, 0]
+        original_mask = list(item_mask)
+
+        stage_mask, stage_index, stage_name = handler._active_stage_mask(item_mask)
+
+        self.assertEqual(stage_mask, [0, 1, 1, 0, 0, 0])
+        self.assertEqual(stage_index, 0)
+        self.assertEqual(stage_name, "daily_life")
+        self.assertEqual(item_mask, original_mask)
+
+    def test_active_stage_mask_advances_and_skips_cross_scored_later_item(self):
+        handler = HandlerRL()
+        handler.screening_stages = [
+            {"name": "daily_life", "item_ids": [1, 2]},
+            {"name": "social", "item_ids": [3, 4]},
+        ]
+        # The daily stage is complete. Item 3 was already cross-scored by an
+        # earlier multi-segment response, so only item 4 remains in stage 2.
+        item_mask = [0, 0, 0, 0, 1, 0]
+
+        stage_mask, stage_index, stage_name = handler._active_stage_mask(item_mask)
+
+        self.assertEqual(stage_mask, [0, 0, 0, 0, 1, 0])
+        self.assertEqual(stage_index, 1)
+        self.assertEqual(stage_name, "social")
+
+    def test_resolve_screening_stages_rejects_missing_dimensions(self):
+        handler = HandlerRL()
+        handler.question_lib = {
+            "1": {"1": {"label": "sleep", "score": [], "notes": []}},
+            "2": {"1": {"label": "eat", "score": [], "notes": []}},
+        }
+        original_enabled = handler_rl.STAGED_SCREENING_ENABLED
+        original_stages = handler_rl.STAGED_SCREENING_STAGES
+
+        try:
+            handler_rl.STAGED_SCREENING_ENABLED = True
+            handler_rl.STAGED_SCREENING_STAGES = [
+                {"name": "daily_life", "intro": "Daily routine.", "dimensions": ["sleep"]}
+            ]
+            with self.assertRaisesRegex(ValueError, "does not cover"):
+                handler._resolve_screening_stages()
+        finally:
+            handler_rl.STAGED_SCREENING_ENABLED = original_enabled
+            handler_rl.STAGED_SCREENING_STAGES = original_stages
+
     def test_sync_answered_item_mask_removes_cross_scored_dimension(self):
         handler = HandlerRL()
         handler.question_lib = {

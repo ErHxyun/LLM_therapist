@@ -37,6 +37,26 @@ class QuestionerRVLoopTest(unittest.TestCase):
         self.assertEqual(validation, "It makes sense that this has been difficult.")
         self.assertEqual(questioner._PENDING_VALIDATION_TEXT, "")
         self.assertEqual(questioner._PENDING_NEXT_QUESTION_INTRO, "")
+    def test_stage_intro_appends_after_existing_rv_continuation(self):
+        questioner._set_pending_validation_text(
+            "VALIDATION: It makes sense that this has been difficult."
+        )
+        questioner._set_pending_next_question_intro(
+            "Thank you for your clarification. Let's continue our questions."
+        )
+        questioner.append_pending_next_question_intro(
+            "Next, I'd like to ask about work or school."
+        )
+
+        combined = questioner._compose_question_with_intro("How has work been?")
+
+        self.assertEqual(
+            combined,
+            "It makes sense that this has been difficult. "
+            "Thank you for your clarification. Let's continue our questions. "
+            "Next, I'd like to ask about work or school. How has work been?",
+        )
+
 
     def test_reflective_followup_uses_paper_summarizer_and_cleans_label(self):
         questioner.reflective_summarizer = lambda question, response: (
@@ -1137,6 +1157,78 @@ class QuestionerRVLoopTest(unittest.TestCase):
         self.assertEqual(len(result.metrics["segment_latencies_ms"]), 2)
         self.assertGreaterEqual(result.metrics["analyzer_latency_ms"], 0.0)
         self.assertFalse(result.metrics["batch_fallback"])
+
+    def test_classify_segments_uses_full_context_and_adjudicates_one_dimension(self):
+        original = questioner.get_openai_resp
+        calls = []
+
+        def fake_get_openai_resp(segment, question, dimension, metrics=None):
+            calls.append((segment, question, dimension))
+            metrics["analyzer_call_count"] = 1
+            metrics["batch_fallback"] = False
+            if segment.startswith("I usually take it. Sometimes"):
+                return "medication", 1
+            if segment == "I usually take it":
+                return "medication", 0
+            return "medication", 1
+
+        try:
+            questioner.get_openai_resp = fake_get_openai_resp
+            result = questioner.classify_segments(
+                ["I usually take it", "Sometimes I forget"],
+                "Have you been taking medication consistently?",
+                "medication",
+            )
+        finally:
+            questioner.get_openai_resp = original
+
+        self.assertEqual(result, [("medication", 1)])
+        self.assertEqual(result.segments, ["I usually take it. Sometimes I forget"])
+        self.assertEqual(result.metrics["analyzer_call_count"], 3)
+        self.assertEqual(result.metrics["coalesced_segment_count"], 1)
+        self.assertIn(
+            "Full Answer: I usually take it Sometimes I forget",
+            calls[0][1],
+        )
+        self.assertIn("Target Segment: I usually take it", calls[0][1])
+
+    def test_completed_dimension_ignores_later_cross_dimension_score(self):
+        question_lib = {
+            "1": {
+                "1": {
+                    "label": "medication",
+                    "question": ["Have you been taking medication consistently?"],
+                    "score": [],
+                    "notes": [],
+                }
+            },
+            "2": {
+                "1": {
+                    "label": "eat",
+                    "question": ["Have you been eating regularly?"],
+                    "score": [0],
+                    "notes": [],
+                }
+            },
+        }
+
+        outcome = questioner._if_valid_response(
+            [("eat", 1), ("medication", 1)],
+            1,
+            "1",
+            ["Sometimes I forget", "Sometimes I forget"],
+            "Have you been taking medication consistently?",
+            question_lib,
+        )
+
+        self.assertTrue(outcome.current_answered)
+        self.assertEqual(outcome.covered_item_ids, {1})
+        self.assertEqual(question_lib["1"]["1"]["score"], [1])
+        self.assertEqual(question_lib["2"]["1"]["score"], [0])
+        self.assertIn(
+            "cross_dimension_duplicate_ignored: true",
+            question_lib["2"]["1"]["notes"][-1],
+        )
 
 if __name__ == "__main__":
     unittest.main()

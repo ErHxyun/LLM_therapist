@@ -123,6 +123,18 @@ def _set_pending_next_question_intro(text: str) -> None:
     _PENDING_NEXT_QUESTION_INTRO = str(text or "").strip()
 
 
+def append_pending_next_question_intro(text: str) -> None:
+    """Append a deterministic stage transition after any queued R-V continuation."""
+    global _PENDING_NEXT_QUESTION_INTRO
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return
+    if _PENDING_NEXT_QUESTION_INTRO:
+        _PENDING_NEXT_QUESTION_INTRO = f"{_PENDING_NEXT_QUESTION_INTRO} {cleaned}"
+    else:
+        _PENDING_NEXT_QUESTION_INTRO = cleaned
+
+
 def _pop_pending_next_question_intro() -> str:
     global _PENDING_NEXT_QUESTION_INTRO
     text = _PENDING_NEXT_QUESTION_INTRO
@@ -509,26 +521,34 @@ def _build_followup_for_score(
 class ClassificationResults(list):
     """List-compatible classifications with per-turn performance metadata."""
 
-    def __init__(self, values=(), metrics=None):
+    def __init__(self, values=(), metrics=None, segments=None):
         super().__init__(values)
         self.metrics = dict(metrics or {})
+        self.segments = list(segments or [])
 
 
 def classify_segments(user_segments: List[str], original_question: str, dimension_label: str) -> List[Tuple[str, int]]:
-    """Classify every non-empty segment and retain aggregate call metrics."""
+    """Classify segments with full-answer context and one result per dimension."""
     nonempty_segments = [str(segment).strip() for segment in user_segments if str(segment).strip()]
     logger.info("Classifying user segments. Total segments: %d", len(nonempty_segments))
-    result = []
+    full_answer = " ".join(nonempty_segments)
+    raw_results = []
     analyzer_call_count = 0
     analyzer_latency_ms = 0.0
     segment_latencies_ms = []
+    adjudication_latencies_ms = []
     batch_fallback = False
     for seg in nonempty_segments:
         call_metrics = {}
         started_at = time.monotonic()
+        classification_question = original_question
+        if len(nonempty_segments) > 1:
+            classification_question = (
+                f"{original_question}\nFull Answer: {full_answer}\nTarget Segment: {seg}"
+            )
         label, score = get_openai_resp(
             seg,
-            original_question,
+            classification_question,
             dimension_label,
             metrics=call_metrics,
         )
@@ -538,16 +558,81 @@ def classify_segments(user_segments: List[str], original_question: str, dimensio
         analyzer_call_count += int(call_metrics.get("analyzer_call_count", 0))
         batch_fallback = batch_fallback or bool(call_metrics.get("batch_fallback", False))
         logger.debug("Segment classified: '%s' -> (dim: %s, val: %s)", seg, label, str(score))
-        result.append((label, score))
+        raw_results.append((label, score))
+
+    result = []
+    result_segments = []
+    processed_dimensions = set()
+    for index, (label, score) in enumerate(raw_results):
+        if score not in [0, 1, 2]:
+            result.append((label, score))
+            result_segments.append(nonempty_segments[index])
+            continue
+
+        dimension_key = str(label).strip().lower()
+        if dimension_key in processed_dimensions:
+            continue
+        processed_dimensions.add(dimension_key)
+        matching_indices = [
+            candidate_index
+            for candidate_index, (candidate_label, candidate_score) in enumerate(raw_results)
+            if str(candidate_label).strip().lower() == dimension_key
+            and candidate_score in [0, 1, 2]
+        ]
+        grouped_segments = list(dict.fromkeys(nonempty_segments[i] for i in matching_indices))
+        combined_segment = ". ".join(grouped_segments)
+        grouped_scores = [int(raw_results[i][1]) for i in matching_indices]
+        final_score = grouped_scores[0]
+
+        if len(set(grouped_scores)) > 1:
+            call_metrics = {}
+            started_at = time.monotonic()
+            adjudication_question = (
+                f"{original_question}\nFull Answer: {full_answer}\n"
+                f"Relevant {label} Segments: {combined_segment}\n"
+                f"Return one final score for dimension {label}."
+            )
+            adjudicated_label, adjudicated_score = get_openai_resp(
+                combined_segment,
+                adjudication_question,
+                str(label),
+                metrics=call_metrics,
+            )
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            analyzer_latency_ms += elapsed_ms
+            adjudication_latencies_ms.append(round(elapsed_ms, 2))
+            analyzer_call_count += int(call_metrics.get("analyzer_call_count", 0))
+            batch_fallback = batch_fallback or bool(call_metrics.get("batch_fallback", False))
+            if adjudicated_score in [0, 1, 2]:
+                final_score = int(adjudicated_score)
+            else:
+                final_score = max(grouped_scores)
+                logger.warning(
+                    "Dimension-score adjudication failed for %s; using conservative fallback %s.",
+                    label,
+                    final_score,
+                )
+            logger.info(
+                "Adjudicated conflicting %s scores %s as %s (model_label=%s).",
+                label,
+                grouped_scores,
+                final_score,
+                adjudicated_label,
+            )
+
+        result.append((label, final_score))
+        result_segments.append(combined_segment)
     metrics = {
         "segment_count": len(nonempty_segments),
+        "coalesced_segment_count": len(result),
         "analyzer_call_count": analyzer_call_count,
         "analyzer_latency_ms": round(analyzer_latency_ms, 2),
         "segment_latencies_ms": segment_latencies_ms,
+        "adjudication_latencies_ms": adjudication_latencies_ms,
         "batch_fallback": batch_fallback,
     }
     logger.info("Classification complete. Results: %s metrics=%s", str(result), metrics)
-    return ClassificationResults(result, metrics)
+    return ClassificationResults(result, metrics, segments=result_segments)
 
 
 
@@ -783,6 +868,26 @@ def _if_valid_response(
             is_current_dimension = (
                 target_item == current_item and target_question == current_question
             )
+            if not is_current_dimension and target_entry.get("score"):
+                assessment = SegmentAssessment(
+                    segment_index=index,
+                    text=answer_text,
+                    dimension=target_dimension,
+                    item_id=target_item_id,
+                    score=int(score_norm),
+                    response_type="score",
+                    valid=True,
+                )
+                outcome.assessments.append(assessment)
+                target_entry.setdefault("notes", []).append([
+                    "original_question: " + original_question,
+                    "original_resp: " + answer_text,
+                    "classified_dimension: " + target_dimension,
+                    "cross_dimension: true",
+                    "cross_dimension_duplicate_ignored: true",
+                ])
+                logger.info("Ignored later cross-dimension score for completed dimension %s.", target_dimension)
+                continue
             assessment = SegmentAssessment(
                 segment_index=index,
                 text=answer_text,
@@ -1291,13 +1396,16 @@ def ask_question(
             attempt_metrics.setdefault("analyzer_latency_ms", 0.0)
             attempt_metrics.setdefault("batch_fallback", False)
             DLA_result = [[label, score] for label, score in classification_result]
+            evaluated_segments = list(
+                getattr(classification_result, "segments", None) or user_input
+            )
             score_before = list(question_lib[str(S)][str(question_A)]["score"])
             valid, DLA_terminate, previous_question, question_lib = evaluate_result(
                 question_lib,
                 DLA_result,
                 S,
                 question_A,
-                user_input,
+                evaluated_segments,
                 question_text,
                 session_control=session_control,
                 metrics=attempt_metrics,
@@ -1358,13 +1466,16 @@ def ask_question(
                 attempt_metrics.setdefault("analyzer_latency_ms", 0.0)
                 attempt_metrics.setdefault("batch_fallback", False)
                 DLA_result = [[label, score] for label, score in classification_result]
+                evaluated_segments = list(
+                    getattr(classification_result, "segments", None) or user_input
+                )
                 score_before = list(question_lib[str(S)][str(question_A)]["score"])
                 valid, DLA_terminate, previous_question, question_lib = evaluate_result(
                     question_lib,
                     DLA_result,
                     S,
                     question_A,
-                    user_input,
+                    evaluated_segments,
                     question_text,
                     session_control=session_control,
                     metrics=attempt_metrics,

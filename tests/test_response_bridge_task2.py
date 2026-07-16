@@ -182,6 +182,57 @@ class ResponseBridgeTask2Test(unittest.TestCase):
         finally:
             response_bridge.classify_dimension_and_score_result = original
 
+    def test_friend_support_corrects_family_support_model_confusion(self):
+        original = response_bridge.classify_dimension_and_score_result
+        try:
+            response_bridge.classify_dimension_and_score_result = (
+                lambda _answer, _question: normalize_task1_output("family_support, 0")
+            )
+            self.assertEqual(
+                response_bridge.get_openai_resp(
+                    "My friend Jack is very supportive.",
+                    "Do you have friends or other people you can rely on for support?",
+                    "social_support",
+                ),
+                ("social_support", 0),
+            )
+        finally:
+            response_bridge.classify_dimension_and_score_result = original
+
+    def test_family_support_corrects_social_support_model_confusion(self):
+        original = response_bridge.classify_dimension_and_score_result
+        try:
+            response_bridge.classify_dimension_and_score_result = (
+                lambda _answer, _question: normalize_task1_output("social_support, 1")
+            )
+            self.assertEqual(
+                response_bridge.get_openai_resp(
+                    "My mother helps me, but she is not always available.",
+                    "Do you feel supported by your family?",
+                    "family_support",
+                ),
+                ("family_support", 1),
+            )
+        finally:
+            response_bridge.classify_dimension_and_score_result = original
+
+    def test_support_reconciliation_keeps_unrelated_cross_dimension_result(self):
+        original = response_bridge.classify_dimension_and_score_result
+        try:
+            response_bridge.classify_dimension_and_score_result = (
+                lambda _answer, _question: normalize_task1_output("eat, 0")
+            )
+            self.assertEqual(
+                response_bridge.get_openai_resp(
+                    "I have been eating regularly.",
+                    "Have you been sleeping enough recently?",
+                    "sleep",
+                ),
+                ("eat", 0),
+            )
+        finally:
+            response_bridge.classify_dimension_and_score_result = original
+
     def test_task1_adjacent_dimension_result_is_preserved(self):
         original = response_bridge.classify_dimension_and_score_result
         try:
@@ -198,6 +249,56 @@ class ResponseBridgeTask2Test(unittest.TestCase):
             )
         finally:
             response_bridge.classify_dimension_and_score_result = original
+
+    def test_explicit_cross_dimension_answer_uses_isolated_task1_input(self):
+        original = response_bridge.classify_dimension_and_score_result
+        calls = []
+        try:
+            def fake_classify(answer, question):
+                calls.append((answer, question))
+                return normalize_task1_output("eat, 0")
+
+            response_bridge.classify_dimension_and_score_result = fake_classify
+            metrics = {}
+            self.assertEqual(
+                response_bridge.get_openai_resp(
+                    "I have been eating regularly.",
+                    "Have you been sleeping enough recently?",
+                    "sleep",
+                    metrics,
+                ),
+                ("eat", 0),
+            )
+        finally:
+            response_bridge.classify_dimension_and_score_result = original
+
+        self.assertEqual(calls, [("I have been eating regularly.", "")])
+        self.assertEqual(metrics["context_mode"], "isolated_explicit_dimension")
+
+    def test_elliptical_answer_retains_question_context_for_task1(self):
+        original = response_bridge.classify_dimension_and_score_result
+        calls = []
+        question = "How often do you take your medication as prescribed?"
+        try:
+            def fake_classify(answer, received_question):
+                calls.append((answer, received_question))
+                return normalize_task1_output("medication, 1")
+
+            response_bridge.classify_dimension_and_score_result = fake_classify
+            metrics = {}
+            self.assertEqual(
+                response_bridge.get_openai_resp(
+                    "Sometimes I forget.", question, "medication", metrics
+                ),
+                ("medication", 1),
+            )
+        finally:
+            response_bridge.classify_dimension_and_score_result = original
+
+        self.assertEqual(calls, [("Sometimes I forget.", question)])
+        self.assertEqual(
+            metrics["context_mode"], "question_context_for_elliptical_answer"
+        )
 
     def test_task1_stop_requires_explicit_user_stop(self):
         original = response_bridge.classify_dimension_and_score_result

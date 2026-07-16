@@ -88,6 +88,18 @@ There are some dimension maybe confusing, to distinguish them:
 1. eat cares does the user eat regularly and nutirtion cares more about whether the user eat enough good food for nutrition.
 2. mood cares about the feeling of the user, while emo cares about whether the user is able to express their feelings to others.
 3. safe concerns the safety of users' lives, while risk cares if the user is taking any risks. 
+4. family_support is support specifically from family members. social_support is support from friends, classmates, coworkers, neighbors, or other non-family people. social is the quality of friendships and coworker relationships.
+5. problem means problem-solving and decision-making ability. Do not use problem merely because an answer says something is hard, difficult, good, or bad.
+
+Context rules:
+- When Question and Answer are provided, interpret short or incomplete clauses using that question.
+- Do not invent an unrelated dimension for a context-dependent phrase such as "Sometimes I forget", "It has been hard", or "Not really".
+- Use a different dimension only when the answer explicitly provides standalone information about that other dimension.
+
+Context examples:
+{"in":"Question: Have you been taking medication consistently?\nAnswer: Sometimes I forget.", "res":"medication, 1"}
+{"in":"Question: Do you have close support besides family?\nAnswer: My friend Jack is very supportive.", "res":"social_support, 0"}
+{"in":"Question: What have your friendships or coworker relationships been like?\nAnswer: It has been very hard.", "res":"social, 2"}
 
 If the user input is general response, such as “Sure”, “Not really”, “I don’t know”, “I don’t understand your question”, “let us stop here”, or anything similar, the DIMENSION will be within [Yes, No, Maybe, Question, Stop], and the SCORE will be 0.
 
@@ -241,10 +253,13 @@ def _chat_complete(system_content: str, user_content: str):
     return llm_complete(system_content, user_content)
 
 
-def _format_task1_input(user_input: str) -> str:
-    """Match the task1 adapter's few-shot continuation format."""
-
-    return f'{{"in":{json.dumps(str(user_input))}, "res":'
+def _format_task1_input(user_input: str, original_question: str = "") -> str:
+    """Match the task1 continuation format while retaining question context."""
+    answer = str(user_input)
+    question = str(original_question or "").strip()
+    if question:
+        answer = f"Question: {question}\nAnswer: {answer}"
+    return f'{{"in":{json.dumps(answer)}, "res":'
 
 
 def classify_dimension_and_score_result(user_input: str, original_question: str) -> DimScoreContract:
@@ -257,7 +272,7 @@ def classify_dimension_and_score_result(user_input: str, original_question: str)
     logger.info("Classifying user input for dimension and score.")
     logger.debug(f"Original question: {original_question}")
     logger.debug(f"User input: {user_input}")
-    payload = _format_task1_input(user_input)
+    payload = _format_task1_input(user_input, original_question)
     raw = llm_complete_task(
         LLMTask.TASK1_RESPONSE_ANALYZER,
         INIT_ASKER_SYSTEM_PROMPT_V2,

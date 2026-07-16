@@ -33,7 +33,7 @@ class ResponseAnalyzerTask1Test(unittest.TestCase):
         self.assertEqual(task, LLMTask.TASK1_RESPONSE_ANALYZER)
         self.assertEqual(
             user_content,
-            '{"in":"My weight increased a lot recently.", "res":',
+            '{"in":"Question: Have your weight changed significantly recently?\\nAnswer: My weight increased a lot recently.", "res":',
         )
         self.assertIn("To assign the user input with DIMENSION and SCORE", system_content)
         self.assertEqual(max_new_tokens, 16)
@@ -66,6 +66,14 @@ class ResponseAnalyzerTask1Test(unittest.TestCase):
         self.assertEqual(
             response_analyzer._format_task1_input('He said "I gained weight."'),
             '{"in":"He said \\"I gained weight.\\"", "res":',
+        )
+
+    def test_task1_input_includes_question_context(self):
+        self.assertEqual(
+            response_analyzer._format_task1_input(
+                "Sometimes I forget.", "Have you been taking medication consistently?"
+            ),
+            '{"in":"Question: Have you been taking medication consistently?\\nAnswer: Sometimes I forget.", "res":',
         )
 
 
