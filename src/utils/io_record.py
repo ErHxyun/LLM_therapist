@@ -14,6 +14,20 @@ logger = get_logger("IORecord")
 
 HEADER = ["Question", "Question_Lock", "Resp", "Resp_Lock"]
 NO_RESPONSE_PREFIX = "__CAITI_NO_RESPONSE__"
+LONG_RESPONSE_PREFIX = "__CAITI_LONG_RESPONSE__"
+
+
+class _ResponseProfilePrompt(str):
+    def __new__(cls, value: str, response_profile: str):
+        instance = super().__new__(cls, str(value or ""))
+        instance.response_profile = response_profile
+        return instance
+
+
+def long_response_prompt(text: str) -> str:
+    return _ResponseProfilePrompt(text, "long")
+
+
 RECORD_LOCK = threading.RLock()
 
 # Module-level buffer to prepend content to the next question output.
@@ -94,6 +108,9 @@ def _write(df):
     time.sleep(0.03)
 
 def _log_question_record(text: str, expects_response: bool):
+    response_profile = getattr(text, "response_profile", "standard")
+    visible_text = str(text or "")
+
     while True:
         time.sleep(0.1)
         with RECORD_LOCK:
@@ -101,13 +118,16 @@ def _log_question_record(text: str, expects_response: bool):
             if data.loc[0, "Question_Lock"] == 0:
                 # If there is a pending prefix (e.g., RV validation), combine it with the question
                 global _PENDING_QUESTION_PREFIX
-                combined = text
+                combined = visible_text
                 if _PENDING_QUESTION_PREFIX:
-                    combined = f"{_PENDING_QUESTION_PREFIX}\n\n{text}"
+                    combined = f"{_PENDING_QUESTION_PREFIX}\n\n{visible_text}"
                     logger.info("Combining pending prefix with next question using two newlines.")
+                record_text = combined
                 if not expects_response:
-                    combined = f"{NO_RESPONSE_PREFIX}\n{combined}"
-                data.loc[0, "Question"] = combined
+                    record_text = f"{NO_RESPONSE_PREFIX}\n{combined}"
+                elif response_profile == "long":
+                    record_text = f"{LONG_RESPONSE_PREFIX}\n{combined}"
+                data.loc[0, "Question"] = record_text
                 data.loc[0, "Question_Lock"] = 1
                 _write(data)
                 # Clear the prefix once consumed

@@ -9,7 +9,7 @@ from src.voice.backends import CommandSTT, CommandTTS, FasterWhisperSTT
 import src.voice.io_loop as voice_io
 from src.voice.sentence_stream import split_for_tts
 from src.emotion import NullEmotionSideChannel
-from src.utils.io_record import HEADER
+from src.utils.io_record import HEADER, LONG_RESPONSE_PREFIX
 
 
 class _Completed:
@@ -41,6 +41,16 @@ class VoiceIOTests(unittest.TestCase):
         text, expects_response = voice_io.parse_voice_prompt("__CAITI_NO_RESPONSE__\nGoodbye.")
         self.assertEqual(text, "Goodbye.")
         self.assertFalse(expects_response)
+
+    def test_parse_voice_prompt_extracts_long_response_metadata(self):
+        text, expects_response, profile = voice_io.parse_voice_prompt_metadata(
+            f"{LONG_RESPONSE_PREFIX}\nTell me more."
+        )
+
+        self.assertEqual(text, "Tell me more.")
+        self.assertTrue(expects_response)
+        self.assertEqual(profile, "long")
+        self.assertNotIn(LONG_RESPONSE_PREFIX, text)
 
     def test_command_stt_returns_stdout_transcript(self):
         calls = []
@@ -127,6 +137,31 @@ class VoiceIOTests(unittest.TestCase):
 
         self.assertEqual([name for name, _ in calls].count("load"), 1)
         self.assertEqual([name for name, _ in calls].count("record"), 2)
+
+    def test_faster_whisper_uses_adaptive_silence_windows_and_120_second_cap(self):
+        stt = FasterWhisperSTT(
+            record_seconds=120,
+            silence_timeout_sec=2.0,
+            long_response_silence_timeout_sec=4.5,
+            trailing_pad_sec=0.5,
+        )
+
+        standard = stt._recording_settings()
+        self.assertEqual(standard.record_seconds, 120)
+        self.assertEqual(standard.silence_timeout_sec, 2.0)
+        self.assertEqual(
+            standard.silence_timeout_sec + standard.trailing_pad_sec,
+            2.5,
+        )
+
+        stt.set_response_profile("long")
+        long_response = stt._recording_settings()
+        self.assertEqual(long_response.record_seconds, 120)
+        self.assertEqual(long_response.silence_timeout_sec, 4.5)
+        self.assertEqual(
+            long_response.silence_timeout_sec + long_response.trailing_pad_sec,
+            5.0,
+        )
 
     def test_faster_whisper_can_start_music_between_recording_and_transcribe(self):
         events = []
@@ -233,6 +268,50 @@ class VoiceIOTests(unittest.TestCase):
         self.assertEqual(result.loc[0, "Resp"], "My weight increased recently.")
         self.assertEqual(int(result.loc[0, "Question_Lock"]), 0)
         self.assertEqual(int(result.loc[0, "Resp_Lock"]), 0)
+
+    def test_process_voice_turn_applies_long_profile_without_speaking_marker(self):
+        class FakeSTT:
+            def __init__(self):
+                self.profiles = []
+
+            def set_response_profile(self, profile):
+                self.profiles.append(profile)
+
+            def listen(self):
+                return "I need a moment to explain this."
+
+        class FakeTTS:
+            def __init__(self):
+                self.spoken = []
+
+            def speak(self, text):
+                self.spoken.append(text)
+
+            def speak_stream(self, text):
+                self.spoken.append(text)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record_path = str(Path(tmpdir) / "record.csv")
+            pd.DataFrame(
+                [[f"{LONG_RESPONSE_PREFIX}\nTell me more.", 1, "", 1]],
+                columns=HEADER,
+            ).to_csv(record_path, index=False)
+
+            original_record_csv = voice_io.RECORD_CSV
+            voice_io.RECORD_CSV = record_path
+            try:
+                stt = FakeSTT()
+                tts = FakeTTS()
+                processed = voice_io.process_voice_turn(stt, tts)
+                result = pd.read_csv(record_path)
+            finally:
+                voice_io.RECORD_CSV = original_record_csv
+
+        self.assertTrue(processed)
+        self.assertEqual(stt.profiles, ["long"])
+        self.assertEqual(tts.spoken, ["Tell me more."])
+        self.assertNotIn(LONG_RESPONSE_PREFIX, tts.spoken[0])
+        self.assertEqual(result.loc[0, "Resp"], "I need a moment to explain this.")
 
     def test_process_voice_turn_stops_and_restarts_waiting_music(self):
         events = []

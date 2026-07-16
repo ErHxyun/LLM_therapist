@@ -152,6 +152,12 @@ VOICE_STT_SILENCE_TIMEOUT_SEC = float(
 VOICE_STT_TRAILING_PAD_SEC = float(
     os.environ.get("CAITI_STT_TRAILING_PAD_SEC", str(VOICE.get("stt_trailing_pad_sec", 0.4)))
 )
+VOICE_STT_LONG_RESPONSE_SILENCE_TIMEOUT_SEC = float(
+    os.environ.get(
+        "CAITI_STT_LONG_RESPONSE_SILENCE_TIMEOUT_SEC",
+        str(VOICE.get("stt_long_response_silence_timeout_sec", 4.5)),
+    )
+)
 VOICE_STT_MIN_SPEECH_SECONDS = float(
     os.environ.get("CAITI_STT_MIN_SPEECH_SECONDS", str(VOICE.get("stt_min_speech_seconds", 0.25)))
 )

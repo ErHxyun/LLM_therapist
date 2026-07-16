@@ -29,7 +29,7 @@ from src.utils.session_records import build_question_attempt_record
 
 # Set up logger for this module
 from src.utils.log_util import get_logger
-from src.utils.io_record import get_answer, get_resp_log, log_question
+from src.utils.io_record import get_answer, get_resp_log, log_question, long_response_prompt
 logger = get_logger("Questioner")
 
 from src.reflection_validation import parse_rv_decision, rv_reasoner, rv_guide, rv_validation
@@ -273,29 +273,34 @@ def _checkpoint_requested_skip_to_cbt(session_control=None) -> bool:
     return method("screening") == "skip_to_cbt"
 
 
+REFLECTIVE_SUMMARY_MAX_WORDS = 24
+REFLECTIVE_FOLLOWUP_QUESTION = "Can you tell me more about that?"
+REFLECTIVE_FALLBACK_SUMMARY = "You shared something important about this."
+
+
 def _fallback_reflective_followup(
     original_response: str,
     original_question: str = "",
 ) -> str:
-    response = " ".join(str(original_response or "").split())
-    question = " ".join(str(original_question or "").split())
-    if response:
-        ending = "" if response[-1] in ".!?" else "."
-        if response.lower() in {"yes", "no"} and question:
-            return f'You said "{response}" to "{question}". Can you tell me more about that?'
-        return f'You mentioned "{response}"{ending} Can you tell me more about that?'
-    return "Can you tell me more about that?"
+    if not str(original_response or "").strip():
+        return REFLECTIVE_FOLLOWUP_QUESTION
+    return f"{REFLECTIVE_FALLBACK_SUMMARY} {REFLECTIVE_FOLLOWUP_QUESTION}"
 
 
 def _clean_reflective_summary(text: str) -> str:
     cleaned = " ".join(str(text or "").split()).strip()
-    return re.sub(
+    cleaned = re.sub(
         r"^REFLECTIVE_(?:SUMMARIZER|SUMMERIZER)\s*:\s*",
         "",
         cleaned,
         count=1,
         flags=re.IGNORECASE,
     ).strip()
+    followup_match = re.search(r"\bcan you tell me more\b", cleaned, flags=re.IGNORECASE)
+    if followup_match:
+        cleaned = cleaned[:followup_match.start()].rstrip(" ,;:-")
+    first_sentence = re.split(r"(?<=[.!?])\s+", cleaned, maxsplit=1)[0]
+    return first_sentence.strip()
 
 
 def _generate_reflective_followup(
@@ -316,10 +321,16 @@ def _generate_reflective_followup(
     summary = _clean_reflective_summary(raw)
     if not summary:
         return fallback, str(raw or ""), True
-    if "can you tell me more" in summary.casefold():
-        return summary, str(raw or ""), False
+    summary_word_count = len(summary.split())
+    if summary_word_count > REFLECTIVE_SUMMARY_MAX_WORDS:
+        logger.warning(
+            "Reflective summary exceeded %s words (%s); using bounded fallback.",
+            REFLECTIVE_SUMMARY_MAX_WORDS,
+            summary_word_count,
+        )
+        return fallback, str(raw or ""), True
     ending = "" if summary[-1] in ".!?" else "."
-    return f"{summary}{ending} Can you tell me more about that?", str(raw or ""), False
+    return f"{summary}{ending} {REFLECTIVE_FOLLOWUP_QUESTION}", str(raw or ""), False
 
 
 def _build_reflective_followup(original_response: str, original_question: str = "") -> str:
@@ -349,6 +360,8 @@ def _log_reflective_followup(
             "mode": "paper_reflective_summarizer",
             "latency_ms": round(latency_ms, 2),
             "fallback_used": fallback_used,
+            "max_summary_words": REFLECTIVE_SUMMARY_MAX_WORDS,
+            "spoken_word_count": len(str(followup_text or "").split()),
         },
     )
 
@@ -863,7 +876,7 @@ def _run_score2_reflection_validation(
         assessment.item_id,
         assessment.dimension,
     )
-    log_question(prompt)
+    log_question(long_response_prompt(prompt))
     user_response = _get_resp_log_with_control(session_control)
     followup_responses = [user_response]
     interrupted = _checkpoint_requested_skip_to_cbt(session_control)
@@ -912,7 +925,7 @@ def _run_score2_reflection_validation(
         )
         rv_latency_ms += (time.monotonic() - rv_call_started) * 1000.0
         rv_guide_texts.append(rv_guide_text)
-        log_question(rv_guide_text)
+        log_question(long_response_prompt(rv_guide_text))
         user_response = _get_resp_log_with_control(session_control)
         followup_responses.append(user_response)
         rv_retry_count += 1
@@ -1004,7 +1017,7 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
         # If valid user response, log the last question and collect user response
         logger.info(f"Logging AI follow-up question and collecting user response for item {S}, question {question_A}.")
         # Log the last AI question and get a user response
-        log_question(followup_to_RV)
+        log_question(long_response_prompt(followup_to_RV))
         user_response = _get_resp_log_with_control(session_control)
         if _checkpoint_requested_skip_to_cbt(session_control):
             logger.info("Reflection follow-up interrupted by skip-to-CBT request.")
@@ -1043,7 +1056,7 @@ def evaluate_result(question_lib, DLA_result, S, question_A, user_input, origina
             logger.info("Follow-up not related, generating guidance and recollecting follow-up.")
             rv_guide_text = rv_guide(topic, original_question_asked, original_resp, user_response)
             rv_guide_texts.append(rv_guide_text)
-            log_question(rv_guide_text)
+            log_question(long_response_prompt(rv_guide_text))
             user_response = _get_resp_log_with_control(session_control)
             if _checkpoint_requested_skip_to_cbt(session_control):
                 logger.info("Reflection retry interrupted by skip-to-CBT request.")

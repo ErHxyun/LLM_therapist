@@ -69,6 +69,34 @@ class QuestionerRVLoopTest(unittest.TestCase):
         )
         self.assertFalse(fallback_used)
 
+    def test_reflective_followup_rejects_overlong_model_summary(self):
+        original_response = " ".join(f"response_word_{i}" for i in range(252))
+        model_summary = " ".join(f"summary_word_{i}" for i in range(107))
+        calls = []
+
+        def fake_summarizer(question, response):
+            calls.append((question, response))
+            return f"REFLECTIVE_SUMMARIZER: {model_summary}"
+
+        questioner.reflective_summarizer = fake_summarizer
+        followup, raw, fallback_used = questioner._generate_reflective_followup(
+            original_response,
+            "What has been difficult recently?",
+        )
+
+        self.assertEqual(calls[0][1], original_response)
+        self.assertEqual(raw, f"REFLECTIVE_SUMMARIZER: {model_summary}")
+        self.assertEqual(
+            followup,
+            "You shared something important about this. Can you tell me more about that?",
+        )
+        self.assertTrue(fallback_used)
+        self.assertLessEqual(
+            len(followup.split()),
+            questioner.REFLECTIVE_SUMMARY_MAX_WORDS + 7,
+        )
+        self.assertNotIn(model_summary, followup)
+
     def test_ask_question_uses_library_question_without_runtime_rewrite(self):
         question_lib = {
             "1": {

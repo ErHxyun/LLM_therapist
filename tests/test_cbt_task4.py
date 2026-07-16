@@ -5,6 +5,21 @@ from src.local_llm.types import GenerationResult, LLMTask
 
 
 class CBTTask4Test(unittest.TestCase):
+    def test_cbt_questions_request_long_response_recording(self):
+        captured = []
+        original = CBT._record_log_question
+        try:
+            CBT._record_log_question = lambda text: captured.append(text)
+            CBT.log_question("How could you challenge that thought?")
+        finally:
+            CBT._record_log_question = original
+
+        self.assertEqual(captured, ["How could you challenge that thought?"])
+        self.assertEqual(
+            getattr(captured[0], "response_profile", "standard"),
+            "long",
+        )
+
     def test_parse_cbt_decision_accepts_adapter_and_paper_formats(self):
         self.assertEqual(CBT.parse_cbt_decision("0"), "0")
         self.assertEqual(CBT.parse_cbt_decision("DECISION: 1"), "1")
@@ -212,7 +227,7 @@ class CBTTask4Test(unittest.TestCase):
         self.assertNotIn("worth", guide.lower())
         self.assertEqual(events[0]["normalized_output"], guide)
 
-    def test_stage3_recap_mirrors_user_challenge_without_llm(self):
+    def test_stage3_recap_is_brief_and_does_not_repeat_long_challenge(self):
         original = CBT.llm_complete
         events = []
         original_log = CBT.log_llm_event
@@ -220,13 +235,14 @@ class CBTTask4Test(unittest.TestCase):
         def fail_if_called(*_args, **_kwargs):
             raise AssertionError("CBT recap should not call the LLM")
 
+        challenge = " ".join(f"detail{i}" for i in range(127))
         try:
             CBT.llm_complete = fail_if_called
             CBT.log_llm_event = lambda **kwargs: events.append(kwargs)
             recap = CBT.recap_stage3_challenge(
                 "I miss deadlines.",
                 "I am failing.",
-                "Missing one deadline does not mean I am failing.",
+                challenge,
             )
         finally:
             CBT.llm_complete = original
@@ -234,9 +250,13 @@ class CBTTask4Test(unittest.TestCase):
 
         self.assertEqual(
             recap,
-            'You challenged the thought by saying: "Missing one deadline does not mean I am failing."',
+            "You identified a way to challenge that unhelpful thought.",
         )
+        self.assertNotIn(challenge, recap)
+        self.assertLessEqual(len(recap.split()), 12)
         self.assertEqual(events[0]["task"], "cbt_stage3_recap")
+        self.assertEqual(events[0]["segment_text"], challenge)
+        self.assertEqual(events[0]["metadata"]["mode"], "brief_challenge_recap")
 
     def test_stage0_prompter_returns_cleaned_model_question(self):
         original = CBT._chat_complete
@@ -273,7 +293,7 @@ class CBTTask4Test(unittest.TestCase):
         )
         self.assertIn("Do not create options, numbers, bullets, or lists", CBT.PROMPTER_CBT_STAGE0_PROMPT)
 
-    def test_run_cbt_uses_stage0_fallback_for_empty_generation(self):
+    def test_run_cbt_uses_brief_recap_and_single_turn_retries(self):
         question_lib = {
             "1": {
                 "1": {
@@ -285,13 +305,25 @@ class CBTTask4Test(unittest.TestCase):
                 }
             }
         }
+        long_challenge = " ".join(f"challenge_detail_{i}" for i in range(127))
         responses = iter([
             "1",
             "If I gain weight, I am failing.",
-            "Gaining weight does not mean I am failing.",
+            "I keep thinking that any weight change means failure.",
+            "I am not sure how to challenge that thought.",
+            long_challenge,
             "I can work on regular meals without judging myself.",
+            "A weight change does not define whether I am succeeding.",
         ])
         logged = []
+        prefixes = []
+        stage3_calls = []
+        stage1_decisions = iter(["DECISION: 1", "DECISION: 0"])
+        stage2_decisions = iter(["DECISION: 1", "DECISION: 0"])
+        stage3_decisions = iter(["DECISION: 1", "DECISION: 0"])
+        guide1 = "GUIDE: Name the specific thought in your own words."
+        guide2 = "GUIDE: Check whether that thought is always true."
+        guide3 = "GUIDE: Use your challenge to write a balanced thought in your own words."
         originals = {
             "stage0_prompter": CBT.stage0_prompter,
             "log_question": CBT.log_question,
@@ -301,16 +333,24 @@ class CBTTask4Test(unittest.TestCase):
             "stage1_reasoner": CBT.stage1_reasoner,
             "stage2_reasoner": CBT.stage2_reasoner,
             "stage3_reasoner": CBT.stage3_reasoner,
+            "stage1_guide": CBT.stage1_guide,
+            "stage2_guide": CBT.stage2_guide,
+            "stage3_guide": CBT.stage3_guide,
         }
         try:
             CBT.stage0_prompter = lambda _history: ""
             CBT.log_question = lambda text: logged.append(str(text))
             CBT.log_system_message = lambda text: logged.append(str(text))
-            CBT.set_question_prefix = lambda _text: None
+            CBT.set_question_prefix = lambda text: prefixes.append(str(text))
             CBT.get_resp_log = lambda: next(responses)
-            CBT.stage1_reasoner = lambda *_args, **_kwargs: "DECISION: 0"
-            CBT.stage2_reasoner = lambda *_args, **_kwargs: "DECISION: 0"
-            CBT.stage3_reasoner = lambda *_args, **_kwargs: "DECISION: 0"
+            CBT.stage1_reasoner = lambda *_args, **_kwargs: next(stage1_decisions)
+            CBT.stage2_reasoner = lambda *_args, **_kwargs: next(stage2_decisions)
+            CBT.stage3_reasoner = lambda *args, **kwargs: (
+                stage3_calls.append((args, kwargs)) or next(stage3_decisions)
+            )
+            CBT.stage1_guide = lambda *_args, **_kwargs: guide1
+            CBT.stage2_guide = lambda *_args, **_kwargs: guide2
+            CBT.stage3_guide = lambda *_args, **_kwargs: guide3
             CBT.run_cbt(question_lib)
         finally:
             for name, value in originals.items():
@@ -320,6 +360,43 @@ class CBTTask4Test(unittest.TestCase):
             "Thank you for answering the questions. Based on your earlier responses",
             logged[0],
         )
+        self.assertEqual(len(stage3_calls), 2)
+        self.assertTrue(
+            all(call_args[0][2] == long_challenge for call_args in stage3_calls)
+        )
+        self.assertEqual(
+            prefixes[-1],
+            "You identified a way to challenge that unhelpful thought.",
+        )
+        self.assertNotIn(long_challenge, prefixes[-1])
+        self.assertFalse(any(long_challenge in prompt for prompt in logged))
+        stage1_retry_turns = [
+            prompt for prompt in logged
+            if "Please provide your UNHELPFUL_THOUGHTS again" in prompt
+        ]
+        stage2_retry_turns = [
+            prompt for prompt in logged
+            if "Please try to CHALLENGE the unhelpful thoughts again" in prompt
+        ]
+        stage3_retry_turns = [
+            prompt for prompt in logged
+            if "Please REFRAME again in one or two sentences." in prompt
+        ]
+        self.assertEqual(
+            stage1_retry_turns,
+            [f"{guide1}\n\nPlease provide your UNHELPFUL_THOUGHTS again, in one sentence."],
+        )
+        self.assertEqual(
+            stage2_retry_turns,
+            [f"{guide2}\n\nPlease try to CHALLENGE the unhelpful thoughts again, in one sentence."],
+        )
+        self.assertEqual(
+            stage3_retry_turns,
+            [f"{guide3}\n\nPlease REFRAME again in one or two sentences."],
+        )
+        self.assertNotIn(guide1, logged)
+        self.assertNotIn(guide2, logged)
+        self.assertNotIn(guide3, logged)
 
     def test_stage0_history_and_statement_use_all_rv_responses(self):
         entry = {

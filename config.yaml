@@ -50,9 +50,9 @@ voice:
   # STT converts microphone audio to text before the LLM pipeline; TTS speaks text after generation.
   stt_backend: "faster_whisper" # console | command | faster_whisper
   tts_backend: "command" # console | command | persistent_piper
-  stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 40 --audio-device default --stt-device cpu --compute-type int8 --beam-size 1 --best-of 1 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --trailing-pad-sec 0.4 --no-speech-timeout-sec 8"
+  stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 120 --audio-device default --stt-device cpu --compute-type int8 --beam-size 1 --best-of 1 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --silence-timeout-sec 2.0 --trailing-pad-sec 0.5 --no-speech-timeout-sec 8"
   stt_whisper_model: "small.en"
-  stt_record_seconds: 40
+  stt_record_seconds: 120
   stt_sample_rate: 16000
   stt_channels: 1
   stt_audio_device: "default"
@@ -69,8 +69,9 @@ voice:
   stt_vad_aggressiveness: 3
   stt_vad_chunk_ms: 30
   stt_silence_threshold_dbfs: -45
-  stt_silence_timeout_sec: 1.2
-  stt_trailing_pad_sec: 0.4
+  stt_silence_timeout_sec: 2.0
+  stt_long_response_silence_timeout_sec: 4.5
+  stt_trailing_pad_sec: 0.5
   stt_min_speech_seconds: 0.25
   stt_min_record_seconds: 1.0
   stt_no_speech_timeout_sec: 8.0

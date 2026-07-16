@@ -1,6 +1,11 @@
+import tempfile
 import unittest
+from pathlib import Path
 
-from src.utils.io_record import segment_user_response
+import pandas as pd
+
+from src.utils import io_record
+from src.utils.io_record import HEADER, LONG_RESPONSE_PREFIX, segment_user_response
 
 
 class IORecordSegmentationTest(unittest.TestCase):
@@ -35,6 +40,33 @@ class IORecordSegmentationTest(unittest.TestCase):
                 "I exercise",
                 "not often",
             ],
+        )
+
+    def test_long_response_prompt_is_persisted_as_internal_record_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record_path = str(Path(tmpdir) / "record.csv")
+            pd.DataFrame(
+                [["", 0, "", 1]],
+                columns=HEADER,
+            ).to_csv(record_path, index=False)
+
+            original_record_csv = io_record.RECORD_CSV
+            original_prefix = io_record._PENDING_QUESTION_PREFIX
+            io_record.RECORD_CSV = record_path
+            io_record._PENDING_QUESTION_PREFIX = ""
+            try:
+                io_record.set_question_prefix("I hear you.")
+                io_record.log_question(
+                    io_record.long_response_prompt("Can you tell me more?")
+                )
+                result = pd.read_csv(record_path)
+            finally:
+                io_record.RECORD_CSV = original_record_csv
+                io_record._PENDING_QUESTION_PREFIX = original_prefix
+
+        self.assertEqual(
+            result.loc[0, "Question"],
+            f"{LONG_RESPONSE_PREFIX}\nI hear you.\n\nCan you tell me more?",
         )
 
 

@@ -7,9 +7,19 @@ from src.utils.llm_output_contracts import normalize_decision_output, parse_bina
 
 # Set up logger for this module
 from src.utils.log_util import get_logger
-from src.utils.io_record import get_resp_log, log_question, log_system_message, set_question_prefix
+from src.utils.io_record import (
+    get_resp_log,
+    log_question as _record_log_question,
+    log_system_message,
+    long_response_prompt,
+    set_question_prefix,
+)
 from src.utils.session_event_logger import log_llm_event
 logger = get_logger("CBT")
+
+
+def log_question(text: str) -> None:
+    _record_log_question(long_response_prompt(text))
 
 
 PROMPTER_CBT_STAGE0_PROMPT = '''You are an AI assistant who has rich psychology and mental health commonsense knowledge and strong reasoning abilities.
@@ -752,12 +762,7 @@ def stage3_guide(statement: str, unhelpful_thoughts: str, challenge: str) -> str
     return guide
 
 def recap_stage3_challenge(statement: str, unhelpful_thoughts: str, challenge: str) -> str:
-    challenge_text = " ".join(str(challenge or "").split())
-    recap = (
-        f'You challenged the thought by saying: "{challenge_text}"'
-        if challenge_text
-        else "You have already challenged the unhelpful thought."
-    )
+    recap = "You identified a way to challenge that unhelpful thought."
     log_llm_event(
         task="cbt_stage3_recap",
         segment_text=challenge,
@@ -765,7 +770,7 @@ def recap_stage3_challenge(statement: str, unhelpful_thoughts: str, challenge: s
         raw_llm_output=recap,
         normalized_output=recap,
         metadata={
-            "mode": "challenge_recap",
+            "mode": "brief_challenge_recap",
             "cbt_stage": 3,
             "unhelpful_thoughts": unhelpful_thoughts,
         },
@@ -923,8 +928,10 @@ def run_cbt(question_lib, session_control=None):
     retry = 0
     while dec1 == "1" and retry < 2:
         guide1 = stage1_guide(statement)
-        log_question(guide1)
-        log_question("Please provide your UNHELPFUL_THOUGHTS again, in one sentence.")
+        log_question(
+            f"{guide1}\n\n"
+            "Please provide your UNHELPFUL_THOUGHTS again, in one sentence."
+        )
         unhelpful = _get_resp_log_with_control(session_control)
         if isinstance(unhelpful, str) and unhelpful.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 1 retry.")
@@ -958,8 +965,10 @@ def run_cbt(question_lib, session_control=None):
     retry = 0
     while dec2 == "1" and retry < 2:
         guide2 = stage2_guide(statement, unhelpful)
-        log_question(guide2)
-        log_question("Please try to CHALLENGE the unhelpful thoughts again, in one sentence.")
+        log_question(
+            f"{guide2}\n\n"
+            "Please try to CHALLENGE the unhelpful thoughts again, in one sentence."
+        )
         challenge = _get_resp_log_with_control(session_control)
         if isinstance(challenge, str) and challenge.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 2 retry.")
@@ -979,7 +988,7 @@ def run_cbt(question_lib, session_control=None):
         ])
         return
 
-    # Stage 3: reframe the thought (prepend an LLM-rephrased recap of user's CHALLENGE)
+    # Stage 3: reframe the thought after a brief recap; keep the full challenge internal.
     session_control.checkpoint("cbt")
     recap3 = recap_stage3_challenge(statement, unhelpful, challenge)
     set_question_prefix(recap3.strip())
@@ -995,8 +1004,10 @@ def run_cbt(question_lib, session_control=None):
     retry = 0
     while dec3 == "1" and retry < 2:
         guide3 = stage3_guide(statement, unhelpful, challenge)
-        log_question(guide3)
-        log_question("Please REFRAME again in one or two sentences.")
+        log_question(
+            f"{guide3}\n\n"
+            "Please REFRAME again in one or two sentences."
+        )
         reframe = _get_resp_log_with_control(session_control)
         if isinstance(reframe, str) and reframe.strip().lower().find("stop") != -1:
             logger.info("User requested stop during CBT stage 3 retry.")

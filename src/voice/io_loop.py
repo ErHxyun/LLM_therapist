@@ -7,7 +7,7 @@ from typing import Optional
 import pandas as pd
 
 from src.utils.config_loader import RECORD_CSV, VOICE_EMPTY_TRANSCRIPT_RETRIES
-from src.utils.io_record import HEADER, NO_RESPONSE_PREFIX, RECORD_LOCK
+from src.utils.io_record import HEADER, LONG_RESPONSE_PREFIX, NO_RESPONSE_PREFIX, RECORD_LOCK
 from src.utils.log_util import get_logger
 from src.voice.backends import STTBackend, TTSBackend, VoiceInterrupted
 from src.voice.music import MusicBackend
@@ -194,6 +194,12 @@ def _set_interrupt_check(backend, checker) -> None:
     method = getattr(backend, "set_interrupt_check", None)
     if callable(method):
         method(checker)
+
+
+def _set_response_profile(stt, profile: str) -> None:
+    method = getattr(stt, "set_response_profile", None)
+    if callable(method):
+        method(profile)
 
 
 def _wait_if_paused(session_control=None) -> None:
@@ -385,13 +391,26 @@ def clean_spoken_text(text: str) -> str:
     return cleaned.strip()
 
 
-def parse_voice_prompt(text: str) -> tuple[str, bool]:
+def parse_voice_prompt_metadata(text: str) -> tuple[str, bool, str]:
     raw = str(text or "")
     expects_response = True
-    if raw.startswith(NO_RESPONSE_PREFIX):
-        raw = raw[len(NO_RESPONSE_PREFIX):].lstrip("\r\n")
-        expects_response = False
-    return raw, expects_response
+    response_profile = "standard"
+    while True:
+        if raw.startswith(NO_RESPONSE_PREFIX):
+            raw = raw[len(NO_RESPONSE_PREFIX):].lstrip("\r\n")
+            expects_response = False
+            continue
+        if raw.startswith(LONG_RESPONSE_PREFIX):
+            raw = raw[len(LONG_RESPONSE_PREFIX):].lstrip("\r\n")
+            response_profile = "long"
+            continue
+        break
+    return raw, expects_response, response_profile
+
+
+def parse_voice_prompt(text: str) -> tuple[str, bool]:
+    spoken_text, expects_response, _response_profile = parse_voice_prompt_metadata(text)
+    return spoken_text, expects_response
 
 
 def process_voice_turn(
@@ -441,12 +460,14 @@ def process_voice_turn(
             _suspend_music_for_spoken_audio(music)
 
         question = original_question
-        spoken_question, expects_response = parse_voice_prompt(question)
+        spoken_question, expects_response, response_profile = parse_voice_prompt_metadata(question)
+        _set_response_profile(stt, response_profile)
         spoken_chunks = split_spoken_chunks(spoken_question)
         logger.info(
-            "Speaking question/response length=%s expects_response=%s spoken_chunks=%s",
+            "Speaking question/response length=%s expects_response=%s response_profile=%s spoken_chunks=%s",
             len(question),
             expects_response,
+            response_profile,
             len(spoken_chunks),
         )
         _speak_stream_chunks_with_status(tts, spoken_chunks, status_leds, should_interrupt=should_interrupt)

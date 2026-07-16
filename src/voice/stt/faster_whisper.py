@@ -39,6 +39,7 @@ class FasterWhisperSTT:
     vad_aggressiveness: int = 3
     silence_threshold_dbfs: float = -45.0
     silence_timeout_sec: float = 1.2
+    long_response_silence_timeout_sec: float = 4.5
     trailing_pad_sec: float = 0.4
     min_speech_seconds: float = 0.25
     min_record_seconds: float = 1.0
@@ -51,11 +52,21 @@ class FasterWhisperSTT:
     _model_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _interrupt_check: Callable[[], bool] | None = field(default=None, init=False, repr=False)
     _emotion_side_channel: Any = field(default=None, init=False, repr=False)
+    _response_profile: str = field(default="standard", init=False, repr=False)
     last_audio_duration_sec: float = field(default=0.0, init=False)
     last_timing: dict[str, float | int | str | bool] = field(default_factory=dict, init=False)
 
     def set_interrupt_check(self, checker: Callable[[], bool] | None) -> None:
         self._interrupt_check = checker
+
+    def set_response_profile(self, profile: str) -> None:
+        normalized = str(profile or "").strip().lower()
+        self._response_profile = "long" if normalized == "long" else "standard"
+
+    def _effective_silence_timeout_sec(self) -> float:
+        if self._response_profile == "long":
+            return self.long_response_silence_timeout_sec
+        return self.silence_timeout_sec
 
     def _should_interrupt(self) -> bool:
         return bool(self._interrupt_check is not None and self._interrupt_check())
@@ -97,7 +108,7 @@ class FasterWhisperSTT:
             vad_detector=self.vad_detector,
             vad_aggressiveness=self.vad_aggressiveness,
             silence_threshold_dbfs=self.silence_threshold_dbfs,
-            silence_timeout_sec=self.silence_timeout_sec,
+            silence_timeout_sec=self._effective_silence_timeout_sec(),
             trailing_pad_sec=self.trailing_pad_sec,
             min_speech_seconds=self.min_speech_seconds,
             min_record_seconds=self.min_record_seconds,
@@ -116,7 +127,7 @@ class FasterWhisperSTT:
             self.auto_stop,
             self.vad_detector,
             self.record_seconds,
-            self.silence_timeout_sec,
+            self._effective_silence_timeout_sec(),
             self.trailing_pad_sec,
             self.no_speech_timeout_sec,
         )
@@ -209,7 +220,8 @@ class FasterWhisperSTT:
         self.last_timing = {
             "auto_stop": self.auto_stop,
             "vad_detector": self.vad_detector,
-            "silence_timeout_sec": self.silence_timeout_sec,
+            "response_profile": self._response_profile,
+            "silence_timeout_sec": self._effective_silence_timeout_sec(),
             "trailing_pad_sec": self.trailing_pad_sec,
             "no_speech_timeout_sec": self.no_speech_timeout_sec,
             "beam_size": self.beam_size,
@@ -229,7 +241,8 @@ class FasterWhisperSTT:
         self.last_timing = {
             "auto_stop": self.auto_stop,
             "vad_detector": self.vad_detector,
-            "silence_timeout_sec": self.silence_timeout_sec,
+            "response_profile": self._response_profile,
+            "silence_timeout_sec": self._effective_silence_timeout_sec(),
             "trailing_pad_sec": self.trailing_pad_sec,
             "no_speech_timeout_sec": self.no_speech_timeout_sec,
             "beam_size": self.beam_size,
@@ -261,7 +274,7 @@ class FasterWhisperSTT:
             self.last_timing.get("transcript_length", 0),
             self.last_timing.get("auto_stop", self.auto_stop),
             self.last_timing.get("vad_detector", self.vad_detector),
-            float(self.last_timing.get("silence_timeout_sec", self.silence_timeout_sec)),
+            float(self.last_timing.get("silence_timeout_sec", self._effective_silence_timeout_sec())),
             float(self.last_timing.get("trailing_pad_sec", self.trailing_pad_sec)),
             float(self.last_timing.get("no_speech_timeout_sec", self.no_speech_timeout_sec)),
             self.last_timing.get("beam_size", self.beam_size),
