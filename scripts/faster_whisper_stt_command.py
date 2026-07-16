@@ -404,7 +404,7 @@ def transcribe_wav_with_model(
         condition_on_previous_text=False,
         initial_prompt=initial_prompt or None,
         vad_filter=vad_filter,
-        without_timestamps=True,
+        without_timestamps=False,
     )
     return " ".join(segment.text.strip() for segment in segments if segment.text).strip()
 

@@ -251,6 +251,28 @@ class CBTTask4Test(unittest.TestCase):
         self.assertEqual(generated, "Which topic would you like to work on?")
         self.assertEqual(empty, "")
 
+    def test_stage0_prompter_rejects_model_generated_subchoices(self):
+        model_output = (
+            "QUESTION: Now that we have explored your recent weight changes, "
+            "which aspect would you like to work on? Would you prefer to focus on: "
+            "1. Identifying negative self-talk, or 2. Managing eating around deadlines?"
+        )
+        original = CBT._chat_complete
+        try:
+            CBT._chat_complete = lambda *_args: model_output
+            generated = CBT.stage0_prompter("screening history")
+        finally:
+            CBT._chat_complete = original
+
+        self.assertEqual(generated, "")
+
+    def test_stage0_prompt_reserves_numbered_options_for_application(self):
+        self.assertIn(
+            "application will append the complete, authoritative numbered list",
+            CBT.PROMPTER_CBT_STAGE0_PROMPT,
+        )
+        self.assertIn("Do not create options, numbers, bullets, or lists", CBT.PROMPTER_CBT_STAGE0_PROMPT)
+
     def test_run_cbt_uses_stage0_fallback_for_empty_generation(self):
         question_lib = {
             "1": {
@@ -329,6 +351,12 @@ class CBTTask4Test(unittest.TestCase):
         self.assertIn("I stress eat during deadlines.", history)
         self.assertNotIn("CBT_stage", history)
         self.assertEqual(statement, "My weight increased recently. I like painting. I stress eat during deadlines.")
+        spoken_recap = CBT.build_cbt_spoken_recap("Maintaining stable weight")
+        self.assertIn("Maintaining stable weight", spoken_recap)
+        self.assertNotIn("My weight increased recently", spoken_recap)
+        self.assertNotIn("I stress eat during deadlines", spoken_recap)
+        self.assertLessEqual(len(spoken_recap.split()), 20)
+
 
 
 if __name__ == "__main__":

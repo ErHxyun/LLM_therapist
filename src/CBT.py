@@ -13,11 +13,29 @@ logger = get_logger("CBT")
 
 
 PROMPTER_CBT_STAGE0_PROMPT = '''You are an AI assistant who has rich psychology and mental health commonsense knowledge and strong reasoning abilities.
-You are reviewing the therapy session history and trying to ask the patient to choose a dimension that he/she would like to work on through this CBT process.
-Only choose those dimensions that received a score of 2 in the conversation history.
+You are reviewing the therapy session history before the user chooses one score-2 dimension to work on through CBT.
+The application will append the complete, authoritative numbered list of score-2 dimensions after your response.
+
+Write exactly one short transition question asking which listed dimension the user would like to work on.
+Do not choose or recommend a dimension.
+Do not repeat dimension names.
+Do not break a dimension into aspects, strategies, or subtopics.
+Do not create options, numbers, bullets, or lists.
+Do not ask more than one question.
+Use no more than 25 words.
+
 Response format:
-QUESTION: xxxx
+QUESTION: Which listed dimension would you like to work on today?
 '''
+
+_STAGE0_OPTION_MARKER_RE = re.compile(
+    r"(?:^|\s)(?:option\s+)?\d{1,2}\s*[\).:]|(?:^|\s)[*-]\s+",
+    flags=re.IGNORECASE,
+)
+_STAGE0_SUBCHOICE_RE = re.compile(
+    r"\b(?:which|what)\s+aspect\b|\bwould\s+you\s+(?:prefer|rather)\b|\bfocus\s+on\s*:",
+    flags=re.IGNORECASE,
+)
 
 REASONER_CBT_STAGE1_PROMPT = '''You are an AI assistant who has rich psychology and mental health commonsense knowledge and strong reasoning abilities.
 You are trying to justify if the patient is effectively going through and responding to cognitive behavioural therapy (CBT) questions.
@@ -543,9 +561,38 @@ def build_cbt_statement(entry: dict) -> str:
     return f"During screening, the user identified difficulty with {name}."
 
 
+def build_cbt_spoken_recap(dimension_name: str) -> str:
+    """Acknowledge the selected dimension without reading private history back."""
+    name = " ".join(str(dimension_name or "this topic").split()).strip()
+    return (
+        f"Let us work on dimension '{name}'. I will keep the details you shared earlier in mind."
+    )
+
+
 def clean_stage0_question(text: str) -> str:
-    raw = re.sub(r"^\s*QUESTION\s*:\s*", "", str(text or ""), flags=re.IGNORECASE)
-    return " ".join(raw.split()).strip()
+    raw = str(text or "").strip()
+    raw = re.sub(r"^\s*QUESTION\s*:\s*", "", raw, flags=re.IGNORECASE)
+    normalized = " ".join(raw.split()).strip()
+    if not normalized:
+        return ""
+
+    # Stage 0 has exactly one authoritative option list, which run_cbt appends
+    # after this generated transition. Reject model-created subchoices so a
+    # spoken number can never refer to two different lists.
+    invalid = (
+        len(normalized.split()) > 35
+        or normalized.count("?") != 1
+        or not normalized.endswith("?")
+        or bool(_STAGE0_OPTION_MARKER_RE.search(raw))
+        or bool(_STAGE0_SUBCHOICE_RE.search(normalized))
+    )
+    if invalid:
+        logger.warning(
+            "Rejected CBT Stage 0 generation that could conflict with the authoritative candidate list: %s",
+            normalized,
+        )
+        return ""
+    return normalized
 
 
 def stage0_prompter(history: str) -> str:
@@ -860,11 +907,8 @@ def run_cbt(question_lib, session_control=None):
         len(extract_rv_user_responses(selected_entry)),
     )
 
-    # Make the selected dimension's complete response history visible to the user.
-    recap = (
-        f"Let us work on dimension '{name_sel}'. "
-        f"Across our screening conversation, you described: {statement}"
-    )
+    # Keep the complete history in the reasoner context without reading it back.
+    recap = build_cbt_spoken_recap(name_sel)
     set_question_prefix(recap)
     log_question("Can you try to identify any unhelpful thoughts you have that contribute to this situation?")
     unhelpful = _get_resp_log_with_control(session_control)

@@ -71,6 +71,24 @@ def _write_test_wav(path: Path, sample_value: int, frames: int = 1600, sample_ra
 
 
 class VoiceCommandScriptTests(unittest.TestCase):
+    def test_whisper_transcription_keeps_internal_timestamp_segmentation(self):
+        calls = []
+
+        class Segment:
+            def __init__(self, text):
+                self.text = text
+
+        class FakeWhisper:
+            def transcribe(self, *_args, **kwargs):
+                calls.append(kwargs)
+                return [Segment(" First part. "), Segment(" Second part. ")], object()
+
+        transcript = stt_script.transcribe_wav_with_model(FakeWhisper(), "long.wav")
+
+        self.assertEqual(transcript, "First part. Second part.")
+        self.assertFalse(calls[0]["without_timestamps"])
+        self.assertFalse(calls[0]["condition_on_previous_text"])
+
     def test_piper_command_uses_stdin_model_and_output_file(self):
         command = tts_script.build_piper_command(
             "piper",
