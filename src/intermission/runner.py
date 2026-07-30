@@ -69,6 +69,19 @@ class NullIntermissionRunner:
     ) -> None:
         return
 
+    def begin_session(
+        self,
+        *,
+        db_path: str,
+        results_json_path: str,
+        session_id: str,
+        resume: bool = False,
+    ) -> None:
+        return
+
+    def end_session(self) -> None:
+        return
+
 
 @dataclass
 class IntermissionRunner:
@@ -83,6 +96,61 @@ class IntermissionRunner:
     _script_index: int = field(default=0, init=False)
     _cooldown_remaining: int = field(default=0, init=False)
     _eligible_turns_since_activity: int = field(default=0, init=False)
+
+    def begin_session(
+        self,
+        *,
+        db_path: str,
+        results_json_path: str,
+        session_id: str,
+        resume: bool = False,
+    ) -> None:
+        """Bind private screening state and storage to one explicit session."""
+        self._screening_index = 0
+        self._screening_answers = {}
+        self._script_index = 0
+        self._cooldown_remaining = 0
+        self._eligible_turns_since_activity = 0
+        self.store = (
+            build_intermission_store(
+                db_path,
+                results_json_path,
+                session_id=session_id,
+            )
+            if self.settings.persist_results
+            else None
+        )
+        if resume and self.store is not None:
+            stored_items = self.store.fetch_items()
+            attempted_ids: set[str] = set()
+            for record in stored_items:
+                item_id = str(record.get("item_id", ""))
+                if not item_id:
+                    continue
+                attempted_ids.add(item_id)
+                score = record.get("score")
+                self._screening_answers[item_id] = None if score is None else int(score)
+            for index, item in enumerate(SCREENING_ITEMS):
+                if item.item_id not in attempted_ids:
+                    self._screening_index = index
+                    break
+            else:
+                self._screening_index = len(SCREENING_ITEMS)
+        logger.info(
+            "Intermission bound to session %s: resume=%s screening_index=%s.",
+            session_id,
+            bool(resume),
+            self._screening_index,
+        )
+
+    def end_session(self) -> None:
+        """Drop all session-specific state while keeping the warmed TTS backend."""
+        self._screening_index = 0
+        self._screening_answers = {}
+        self._script_index = 0
+        self._cooldown_remaining = 0
+        self._eligible_turns_since_activity = 0
+        self.store = None
 
     def run_until_ready(
         self,

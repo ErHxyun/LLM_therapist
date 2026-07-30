@@ -33,9 +33,9 @@ They assume the current local paths:
    If your Jetson uses a conda env or a venv, replace `python` in `ExecStart`
    with the absolute interpreter path.
 
-2. The current voice app still exits after a session finishes. With these
-   units, systemd will restart it automatically, but that is still different
-   from a true in-process `ready_idle -> session -> ready_idle` loop.
+2. The voice app remains resident after a session and returns to
+   `ready_idle`. `Restart=always` is retained so a confirmed full shutdown or
+   unexpected process failure restarts the appliance controller.
 
 3. The monitor remains local by default at `http://127.0.0.1:8765`.
 4. To publish the monitor on a real domain with login protection, use the
@@ -127,23 +127,20 @@ tail -f data/logs/systemd-caiti-cloudflared.log
 ## Notes
 
 - `caiti-pinmux.service` runs as root because `devmem` needs elevated access.
-- `caiti-app.service` also runs the same pinmux script in `ExecStartPre`, so an
-  app restart without a reboot still reapplies the required writes.
+- `caiti-app.service` requires `caiti-pinmux.service`; only the pinmux unit
+  performs the `devmem` writes, so normal boot does not execute them twice.
+- `caiti-app.service` also requires `caiti-emotion.service` and keeps the
+  emotion health check as a hard start gate.
 - If your Jetson image does not have `busybox`, install it first.
 - If the app is silent under `sudo systemctl start caiti-app.service` but the
   same TTS command is audible from a normal terminal, move the app to the user
   service above. Exporting `HOME`, `DISPLAY`, and `PULSE_SERVER` alone is often
   not enough because the process is still outside the real user audio session.
 
-## Recommended Next Code Change
+## Current Session Lifecycle
 
-Move the voice app from a one-session process into a persistent loop:
-
-1. boot and preload once
-2. enter `ready_idle`
-3. wait for button start
-4. run one session
-5. reset session state
-6. return to `ready_idle`
-
-That design is described in `docs/headless_appliance_plan.md`.
+The deployed app preloads once, enters `ready_idle`, accepts a start request
+from Pin 37, the local monitor, or `scripts/caiti_control.py start`, runs one
+session, clears participant-specific live state, and returns to `ready_idle`.
+Participant sessions created at or after the configured cutover are isolated
+under `data/users/<participant>/sessions/<session_id>/`.

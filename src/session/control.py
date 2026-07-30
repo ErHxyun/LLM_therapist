@@ -52,15 +52,16 @@ class SessionControl:
         if not self.settings.enabled:
             self.request_start("disabled")
 
-    def request_start(self, source: str = "button") -> None:
+    def request_start(self, source: str = "button") -> bool:
         with self._lock:
             if self._started:
-                return
+                return False
             self._started = True
             self._set_phase_locked("loading")
             self._started_event.set()
             self._publish_button_event(f"start:{source}")
             logger.info("Session start requested by %s.", source)
+            return True
 
     def handle_short_press(self) -> str:
         with self._lock:

@@ -34,6 +34,9 @@ class NullStatusLEDController:
     def mark_session_started(self) -> None:
         return
 
+    def reset_for_idle(self) -> None:
+        return
+
     def set_tts_active(self, active: bool) -> None:
         return
 
@@ -96,6 +99,14 @@ class StatusLEDController:
         with self._lock:
             self._session_started = True
             self._write_color("yellow", True)
+
+    def reset_for_idle(self) -> None:
+        with self._lock:
+            self._session_started = False
+            self._write_color("white", True)
+            self._write_color("yellow", False)
+            self._write_color("blue", False)
+            self._write_color("green", False)
 
     def set_tts_active(self, active: bool) -> None:
         with self._lock:

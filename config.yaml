@@ -1,6 +1,14 @@
 app:
   subject_id: "8080"
 
+session:
+  # Participants collected before this cutover keep their existing files untouched.
+  enabled: true
+  cutover_participant_number: 26
+  protect_pre_cutover_participants: true
+  resume_incomplete_session: true
+  q_table_scope: "session"
+
 paths:
   # Use forward slashes or absolute Windows paths
   data_dir: "data"

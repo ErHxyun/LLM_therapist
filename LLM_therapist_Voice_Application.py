@@ -1,6 +1,7 @@
 import threading
 import time
 import os
+from dataclasses import replace
 
 from src.handler_rl import HandlerRL
 from src.emotion import clear_emotion_session_state
@@ -10,7 +11,17 @@ from src.hardware.status_leds import build_status_led_controller
 from src.hardware.volume_buttons import build_volume_button_controller
 from src.intermission import build_intermission_runner
 from src.questioner import reset_questioner_session_state
-from src.runtime.user_context import activate_user_context, build_guest_user_id, normalize_spoken_user_id
+from src.runtime.session_context import (
+    activate_session_context,
+    complete_current_session,
+    create_new_session,
+    deactivate_session_context,
+    find_resumable_session,
+    interrupt_current_session,
+    is_protected_participant,
+    update_session_status,
+)
+from src.runtime.user_context import build_guest_user_id, normalize_spoken_user_id
 from src.runtime.status_monitor import build_status_monitor, get_active_status_monitor, set_active_status_monitor
 from src.session.control import SessionShutdownRequested, build_session_control
 from src.utils.io_record import reset_record_state
@@ -33,6 +44,15 @@ USER_ID_FALLBACK_MESSAGE = "I did not catch an ID, so I will use a temporary gue
 USER_ID_CONFIRM_PROMPT = "I heard your participant ID as {value}. Is that correct? Please say yes or no."
 USER_ID_CONFIRM_RETRY_PROMPT = "Please say yes if that participant ID is correct, or say no if you want to try again."
 USER_ID_REENTER_PROMPT = "Okay, please say your participant ID again."
+PROTECTED_ID_MESSAGE = (
+    "That participant ID belongs to the completed one through twenty-five data collection set "
+    "and cannot be changed. Please enter a new participant ID."
+)
+RESUME_SESSION_PROMPT = (
+    "I found an unfinished session for participant {value}. "
+    "Please say resume to continue it, or say new to start a new session."
+)
+RESUME_SESSION_RETRY_PROMPT = "Please say resume or new."
 USER_NAME_PROMPT = "Thank you. Now please say your name."
 USER_NAME_RETRY_PROMPT = "I did not catch the name. Please say your name again."
 USER_NAME_CONFIRM_PROMPT = "I heard your name as {value}. Is that correct? Please say yes or no."
@@ -313,13 +333,17 @@ def _persistent_app_loop_enabled() -> bool:
     return _bool_env(_PERSISTENT_APP_LOOP_ENV, default=False)
 
 
-def _reset_session_runtime(session_control, subject_id: str | None = None) -> str:
-    session_id = build_session_id(subject_id)
-    set_session_id(session_id)
+def _reset_session_runtime(
+    session_control,
+    session_id: str | None = None,
+    subject_id: str | None = None,
+) -> str:
+    resolved_session_id = session_id or build_session_id(subject_id)
+    set_session_id(resolved_session_id)
     reset_record_state()
     reset_questioner_session_state()
     clear_emotion_session_state()
-    return session_id
+    return resolved_session_id
 
 
 def _wait_for_session_start(
@@ -572,11 +596,96 @@ def _run_user_intake(session_control, stt, tts, music, status_leds) -> tuple[str
     return normalized_user_id, display_name
 
 
-def _prepare_user_session(session_control, stt, tts, music, status_leds) -> str:
-    raw_user_id, display_name = _run_user_intake(session_control, stt, tts, music, status_leds)
-    context = activate_user_context(raw_user_id, display_name)
+def _choose_resume_session(
+    *,
+    participant_id: str,
+    session_control,
+    stt,
+    tts,
+    music,
+    status_leds,
+) -> bool:
+    should_interrupt = getattr(session_control, "is_shutdown_requested", None)
+    prompt = RESUME_SESSION_PROMPT.format(value=participant_id)
+    for _attempt in range(2):
+        _speak_prompt(
+            tts,
+            music,
+            status_leds,
+            prompt,
+            should_interrupt=should_interrupt,
+            source="session_resume",
+            expects_response=True,
+        )
+        response = _listen_with_stt(
+            stt,
+            music,
+            status_leds,
+            should_interrupt=should_interrupt,
+        )
+        normalized = str(response or "").strip().lower()
+        tokens = {token.strip(".,!?;:") for token in normalized.split()}
+        if normalized in {"resume", "continue", "resume session"} or tokens & {"resume", "continue"}:
+            return True
+        if normalized in {"new", "new session", "start new"} or tokens & {"new"}:
+            return False
+        prompt = RESUME_SESSION_RETRY_PROMPT
+    return False
+
+
+def _prepare_user_session(session_control, stt, tts, music, status_leds, intermission_runner):
+    while True:
+        raw_user_id, display_name = _run_user_intake(
+            session_control,
+            stt,
+            tts,
+            music,
+            status_leds,
+        )
+        if not is_protected_participant(raw_user_id):
+            break
+        _speak_prompt(
+            tts,
+            music,
+            status_leds,
+            PROTECTED_ID_MESSAGE,
+            source="identity",
+        )
+
+    resumable = find_resumable_session(raw_user_id)
+    if resumable is not None and _choose_resume_session(
+        participant_id=raw_user_id,
+        session_control=session_control,
+        stt=stt,
+        tts=tts,
+        music=music,
+        status_leds=status_leds,
+    ):
+        context = replace(
+            resumable,
+            display_name=display_name or resumable.display_name,
+            resumed=True,
+        )
+    else:
+        if resumable is not None:
+            update_session_status(
+                resumable,
+                "ABANDONED",
+                abandonment_reason="participant chose a new session",
+            )
+        context = create_new_session(raw_user_id, display_name)
+
+    activate_session_context(context)
     _refresh_runtime_user_dependent_state(stt)
-    session_id = _reset_session_runtime(session_control, subject_id=context.subject_id)
+    session_id = _reset_session_runtime(session_control, context.session_id)
+    begin_intermission = getattr(intermission_runner, "begin_session", None)
+    if callable(begin_intermission):
+        begin_intermission(
+            db_path=context.structured_log_db_path,
+            results_json_path=context.intermission_results_json_path,
+            session_id=context.session_id,
+            resume=context.resumed,
+        )
     monitor = get_active_status_monitor()
     if monitor is not None:
         setter = getattr(monitor, "set_session", None)
@@ -585,12 +694,12 @@ def _prepare_user_session(session_control, stt, tts, music, status_leds) -> str:
     logger.info(
         "Prepared new CaiTI session context: %s user=%s name=%s",
         session_id,
-        context.subject_id,
+        context.participant_id,
         context.display_name or "",
     )
     acknowledgement = f"Thank you, {context.display_name}. Let's begin." if context.display_name else "Thank you. Let's begin."
     _speak_prompt(tts, music, status_leds, acknowledgement, source="system")
-    return session_id
+    return context
 
 
 def _run_session(
@@ -610,15 +719,31 @@ def _cleanup_after_session_cycle(
     session_control,
     music,
     voice_idle,
+    status_leds=None,
+    status_monitor=None,
+    intermission_runner=None,
 ) -> None:
     set_phase = getattr(session_control, "set_phase", None)
     if callable(set_phase):
         set_phase("cleanup")
     wait_for_voice_io_drain(voice_idle, timeout_sec=90.0)
     music.stop()
+    end_intermission = getattr(intermission_runner, "end_session", None)
+    if callable(end_intermission):
+        end_intermission()
+    reset_record_state()
+    clear_emotion_session_state()
+    reset_questioner_session_state()
+    deactivate_session_context()
     reset_method = getattr(session_control, "reset_for_next_session", None)
     if callable(reset_method):
         reset_method()
+    reset_leds = getattr(status_leds, "reset_for_idle", None)
+    if callable(reset_leds):
+        reset_leds()
+    reset_monitor = getattr(status_monitor, "reset_for_idle", None)
+    if callable(reset_monitor):
+        reset_monitor()
 
 
 def main():
@@ -641,6 +766,9 @@ def main():
         status_leds=status_leds,
     )
     session_control = build_session_control(status_monitor=status_monitor)
+    set_start_callback = getattr(status_monitor, "set_start_session_callback", None)
+    if callable(set_start_callback):
+        set_start_callback(lambda: session_control.request_start("monitor"))
     restore_music_after_pause = threading.Event()
     shutdown_message_spoken = threading.Event()
     shutdown_voice_lock = threading.Lock()
@@ -713,7 +841,7 @@ def main():
             logger.warning("Button unavailable; starting CaiTI without button gating.")
             session_control.request_start("session button unavailable")
         elif not session_button_started and session_control.settings.enabled and persistent_loop:
-            logger.warning("Button unavailable while persistent loop is enabled; CaiTI will stay idle.")
+            logger.warning("Session button unavailable; use the monitor or scripts/caiti_control.py start.")
         if persistent_loop:
             session_control.set_phase("preloading")
             _preload_llm_runtime()
@@ -724,7 +852,14 @@ def main():
             logger.info("Waiting for button to start CaiTI.")
             if not _wait_for_session_start(session_control, status_monitor, persistent_loop):
                 break
-            _prepare_user_session(session_control, stt, tts, music, status_leds)
+            _prepare_user_session(
+                session_control,
+                stt,
+                tts,
+                music,
+                status_leds,
+                intermission_runner,
+            )
             if not persistent_loop:
                 if not _music_is_background(music):
                     music.start()
@@ -738,17 +873,25 @@ def main():
             _run_session(
                 session_control=session_control,
             )
+            complete_current_session()
             if not persistent_loop:
                 break
             _cleanup_after_session_cycle(
                 session_control=session_control,
                 music=music,
                 voice_idle=voice_idle,
+                status_leds=status_leds,
+                status_monitor=status_monitor,
+                intermission_runner=intermission_runner,
             )
     except SessionShutdownRequested:
+        interrupt_current_session("session-button shutdown request")
         logger.info("Voice application closing after session-button shutdown request.")
         _wait_for_voice_idle(voice_idle)
         speak_shutdown_once()
+    except Exception:
+        interrupt_current_session("unexpected voice application failure")
+        raise
     finally:
         session_control.mark_closing()
         try:

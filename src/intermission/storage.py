@@ -286,6 +286,7 @@ class IntermissionScreeningStore:
 def build_intermission_store(
     db_path: str | None = None,
     json_path: str | None = None,
+    session_id: str | None = None,
 ) -> IntermissionScreeningStore:
     clean_path = str(db_path or "").strip() or None
     if clean_path:
@@ -293,4 +294,9 @@ def build_intermission_store(
     clean_json_path = str(json_path or "").strip() or None
     if clean_json_path:
         clean_json_path = os.path.expanduser(clean_json_path)
-    return IntermissionScreeningStore(db_path=clean_path, json_path=clean_json_path)
+    clean_session_id = str(session_id or "").strip() or None
+    return IntermissionScreeningStore(
+        db_path=clean_path,
+        json_path=clean_json_path,
+        session_id=clean_session_id,
+    )

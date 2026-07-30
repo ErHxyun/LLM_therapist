@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from src.utils import config_loader
@@ -50,6 +50,12 @@ class NullStatusMonitor:
         return
 
     def set_button_event(self, event: str) -> None:
+        return
+
+    def set_start_session_callback(self, callback) -> None:
+        return
+
+    def reset_for_idle(self) -> None:
         return
 
     def set_user(self, **kwargs) -> None:
@@ -103,6 +109,7 @@ class StatusMonitor:
     _started: bool = field(default=False, init=False)
     _version: int = field(default=0, init=False)
     _state: dict[str, Any] = field(init=False)
+    _start_session_callback: Callable[[], bool | None] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self._condition = threading.Condition(self._lock)
@@ -231,6 +238,82 @@ class StatusMonitor:
             if self._version <= last_version:
                 self._condition.wait(timeout=timeout_sec)
             return self.snapshot()
+
+    def set_start_session_callback(self, callback) -> None:
+        with self._lock:
+            self._start_session_callback = callback if callable(callback) else None
+
+    def request_session_start(self) -> tuple[bool, str]:
+        with self._lock:
+            phase = str(self._state.get("phase", ""))
+            callback = self._start_session_callback
+        if phase not in {"ready_idle", "waiting_start"}:
+            return False, f"Session cannot start while phase is {phase or 'unknown'}."
+        if callback is None:
+            return False, "Session start control is unavailable."
+        try:
+            accepted = callback()
+        except Exception as exc:
+            logger.warning("Monitor session-start request failed: %s", exc)
+            return False, "Session start request failed."
+        if accepted is False:
+            return False, "A session is already active."
+        return True, "Session start requested."
+
+    def reset_for_idle(self) -> None:
+        def mutate(state: dict[str, Any]) -> None:
+            state["phase"] = "ready_idle"
+            state["button"] = {"last_event": "", "updated_at": _now_iso()}
+            state["user"] = {
+                "subject_id": "",
+                "raw_subject_id": "",
+                "display_name": "",
+                "user_dir": "",
+                "updated_at": _now_iso(),
+            }
+            state["session"] = {
+                "id": "",
+                "started_at": "",
+                "turn_count": 0,
+                "updated_at": _now_iso(),
+            }
+            state["current_prompt"] = {
+                "text": "",
+                "source": "",
+                "expects_response": False,
+                "item_id": "",
+                "question_index": "",
+                "dimension": "",
+                "updated_at": "",
+            }
+            state["latest_response"] = {
+                "text": "",
+                "source": "",
+                "updated_at": "",
+            }
+            state["latest_score"] = {
+                "item_id": "",
+                "question_index": "",
+                "dimension": "",
+                "score": None,
+                "user_input": "",
+                "classification": [],
+                "followup_text": "",
+                "updated_at": "",
+            }
+            state["emotion"] = {
+                "latest": {},
+                "recent": [],
+                "updated_at": "",
+            }
+            state["intermission"] = {
+                "summary": {},
+                "items": [],
+                "updated_at": "",
+            }
+            state["recent_events"] = []
+
+        self._update(mutate)
 
     def set_phase(self, phase: str) -> None:
         phase = str(phase or "").strip() or "unknown"
@@ -572,6 +655,23 @@ class _StatusRequestHandler(BaseHTTPRequestHandler):
             self._send_events()
             return
         self.send_error(404, "Not found")
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        if path != "/api/session/start":
+            self.send_error(404, "Not found")
+            return
+        accepted, message = self._monitor().request_session_start()
+        body = json.dumps(
+            {"accepted": bool(accepted), "message": message},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self.send_response(200 if accepted else 409)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self._write_body(body)
 
     def log_message(self, format: str, *args) -> None:
         logger.debug("HTTP %s", format % args)
@@ -1245,6 +1345,8 @@ _HTML = """<!doctype html>
         <div class="status-pill syncing" id="connection-pill">Connecting</div>
         <div class="meta-text" id="connection-text">Waiting for live updates...</div>
         <div class="meta-text" id="served-url"></div>
+        <button id="start-session-button" type="button">Start New Session</button>
+        <div class="meta-text" id="start-session-message"></div>
       </div>
     </header>
 
@@ -1582,6 +1684,10 @@ _HTML = """<!doctype html>
       setText("metric-emotion", emotion.risk_level || emotion.risk);
       setText("metric-emotion-sub", formatEmotionSummary(emotion));
 
+      const startButton = document.getElementById("start-session-button");
+      const canStart = ["ready_idle", "waiting_start"].includes(String(state.phase || ""));
+      if (startButton) startButton.disabled = !canStart;
+
       setText("runtime-button", state.button && state.button.last_event);
       setText("runtime-updated", state.updated_at);
       setText("runtime-user-id", user.subject_id);
@@ -1736,6 +1842,25 @@ _HTML = """<!doctype html>
         }
       }
     }
+
+    async function requestSessionStart() {
+      const button = document.getElementById("start-session-button");
+      const message = document.getElementById("start-session-message");
+      if (button) button.disabled = true;
+      if (message) message.textContent = "Requesting session start...";
+      try {
+        const response = await fetch("/api/session/start", { method: "POST" });
+        const payload = await response.json();
+        if (message) message.textContent = safe(payload.message);
+      } catch (_err) {
+        if (message) message.textContent = "Unable to request session start.";
+      }
+    }
+
+    document.getElementById("start-session-button").addEventListener(
+      "click",
+      requestSessionStart,
+    );
 
     async function pollStatus() {
       const res = await fetch("/status", { cache: "no-store" });

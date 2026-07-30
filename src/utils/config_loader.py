@@ -16,6 +16,7 @@ def _load_yaml_config() -> Dict[str, Any]:
 _CFG = _load_yaml_config()
 
 APP = _CFG["app"]
+SESSION = _CFG.get("session", {})
 PATHS = _CFG["paths"]
 RL = _CFG["rl"]
 LOCAL_LLM = _CFG.get("local_llm", {})
@@ -34,6 +35,25 @@ def _expand(path: str) -> str:
 def _bool_env(name: str, default: Any) -> bool:
     value = os.environ.get(name, str(default))
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+SESSION_ENABLED = _bool_env("CAITI_SESSION_STORAGE_ENABLED", SESSION.get("enabled", True))
+SESSION_CUTOVER_PARTICIPANT_NUMBER = int(
+    os.environ.get(
+        "CAITI_SESSION_CUTOVER_PARTICIPANT_NUMBER",
+        str(SESSION.get("cutover_participant_number", 26)),
+    )
+)
+SESSION_PROTECT_PRE_CUTOVER_PARTICIPANTS = _bool_env(
+    "CAITI_PROTECT_PRE_CUTOVER_PARTICIPANTS",
+    SESSION.get("protect_pre_cutover_participants", True),
+)
+SESSION_RESUME_INCOMPLETE = _bool_env(
+    "CAITI_RESUME_INCOMPLETE_SESSION",
+    SESSION.get("resume_incomplete_session", True),
+)
+SESSION_Q_TABLE_SCOPE = str(
+    os.environ.get("CAITI_Q_TABLE_SCOPE", SESSION.get("q_table_scope", "session"))
+).strip().lower()
 
 DATA_DIR = _expand(PATHS["data_dir"])
 LOG_DIR = _expand(PATHS["logs_dir"])

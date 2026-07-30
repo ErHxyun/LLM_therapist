@@ -215,9 +215,14 @@ def _patch_runtime_paths(context: UserContext) -> None:
 
 
 def activate_user_context(subject_id: str, display_name: str = "") -> UserContext:
-    global _CURRENT_CONTEXT
     context = build_user_context(subject_id, display_name)
     ensure_user_context_files(context)
+    return activate_prepared_user_context(context)
+
+
+def activate_prepared_user_context(context: UserContext) -> UserContext:
+    """Activate a fully prepared context without creating or copying files."""
+    global _CURRENT_CONTEXT
     with _LOCK:
         _CURRENT_CONTEXT = context
         os.environ["CAITI_RUNTIME_USER_ID"] = context.subject_id
@@ -247,11 +252,30 @@ def get_current_user_context() -> UserContext | None:
     return _CURRENT_CONTEXT
 
 
+def deactivate_user_context() -> None:
+    global _CURRENT_CONTEXT
+    with _LOCK:
+        _CURRENT_CONTEXT = None
+        for name in (
+            "CAITI_RUNTIME_USER_ID",
+            "CAITI_RUNTIME_USER_NAME",
+            "CAITI_STRUCTURED_LOG_DB",
+            "CAITI_EMOTION_USER_ID",
+            "CAITI_EMOTION_RESULTS_JSONL_PATH",
+            "CAITI_EMOTION_AUDIO_DIR",
+            "CAITI_INTERMISSION_DB_PATH",
+            "CAITI_INTERMISSION_RESULTS_JSON_PATH",
+        ):
+            os.environ.pop(name, None)
+
+
 __all__ = [
     "UserContext",
+    "activate_prepared_user_context",
     "activate_user_context",
     "build_guest_user_id",
     "build_user_context",
+    "deactivate_user_context",
     "get_current_user_context",
     "normalize_spoken_user_id",
 ]
