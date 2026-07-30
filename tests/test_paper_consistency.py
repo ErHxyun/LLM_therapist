@@ -92,8 +92,8 @@ class PaperConsistencyTest(unittest.TestCase):
         self.assertEqual(labels, EXPECTED_DIMENSION_LABELS)
         self.assertEqual(len(set(labels)), 37)
 
-    def test_staged_screening_covers_all_37_dimensions_once(self):
-        self.assertTrue(config_loader.STAGED_SCREENING_ENABLED)
+    def test_staged_screening_definition_is_complete_but_disabled(self):
+        self.assertFalse(config_loader.STAGED_SCREENING_ENABLED)
         stages = config_loader.STAGED_SCREENING_STAGES
         flattened = [
             label

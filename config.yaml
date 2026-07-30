@@ -37,7 +37,7 @@ rl:
   # selector. Q-values, rewards, learning updates, and question variants stay
   # unchanged. Within each stage, the existing RL policy chooses the next item.
   staged_screening:
-    enabled: true
+    enabled: false
     stages:
       - name: daily_life
         dimensions: [sleep, eat, nutrition, hygiene, sports, house, weight]
