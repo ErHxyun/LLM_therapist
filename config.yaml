@@ -80,12 +80,12 @@ voice:
   # STT converts microphone audio to text before the LLM pipeline; TTS speaks text after generation.
   stt_backend: "faster_whisper" # console | command | faster_whisper
   tts_backend: "command" # console | command | persistent_piper
-  stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 120 --audio-device default --stt-device cpu --compute-type int8 --beam-size 1 --best-of 1 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --silence-timeout-sec 2.0 --trailing-pad-sec 0.5 --no-speech-timeout-sec 8"
+  stt_command: "python scripts/faster_whisper_stt_command.py --model small.en --record-seconds 120 --audio-device plughw:CARD=Device,DEV=0 --stt-device cpu --compute-type int8 --beam-size 1 --best-of 1 --vad-filter --auto-stop --vad-detector auto --vad-aggressiveness 3 --silence-timeout-sec 2.0 --trailing-pad-sec 0.5 --no-speech-timeout-sec 8"
   stt_whisper_model: "small.en"
   stt_record_seconds: 120
   stt_sample_rate: 16000
   stt_channels: 1
-  stt_audio_device: "default"
+  stt_audio_device: "plughw:CARD=Device,DEV=0"
   stt_device: "cpu"
   stt_compute_type: "int8"
   # Interactive latency profile: raise these to 5 for slower, more exhaustive decoding.
