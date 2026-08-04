@@ -269,6 +269,64 @@ class VoiceIOTests(unittest.TestCase):
         self.assertEqual(int(result.loc[0, "Question_Lock"]), 0)
         self.assertEqual(int(result.loc[0, "Resp_Lock"]), 0)
 
+    def test_process_voice_turn_uses_voice_access_lock_for_tts_and_stt(self):
+        events = []
+
+        class TrackingLock:
+            active = False
+
+            def __enter__(self):
+                events.append("lock.enter")
+                self.active = True
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self.active = False
+                events.append("lock.exit")
+
+        voice_lock = TrackingLock()
+        test_case = self
+
+        class FakeSTT:
+            def listen(self):
+                test_case.assertTrue(voice_lock.active)
+                events.append("stt.listen")
+                return "I feel okay."
+
+        class FakeTTS:
+            def speak_stream(self, text):
+                test_case.assertTrue(voice_lock.active)
+                events.append(f"tts:{text}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record_path = str(Path(tmpdir) / "record.csv")
+            pd.DataFrame(
+                [["How are you feeling?", 1, "", 1]],
+                columns=HEADER,
+            ).to_csv(record_path, index=False)
+
+            original_record_csv = voice_io.RECORD_CSV
+            voice_io.RECORD_CSV = record_path
+            try:
+                processed = voice_io.process_voice_turn(
+                    FakeSTT(),
+                    FakeTTS(),
+                    voice_access_lock=voice_lock,
+                )
+            finally:
+                voice_io.RECORD_CSV = original_record_csv
+
+        self.assertTrue(processed)
+        self.assertEqual(
+            events,
+            [
+                "lock.enter",
+                "tts:How are you feeling?",
+                "stt.listen",
+                "lock.exit",
+            ],
+        )
+
     def test_process_voice_turn_applies_long_profile_without_speaking_marker(self):
         class FakeSTT:
             def __init__(self):

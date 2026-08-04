@@ -1,6 +1,7 @@
 import threading
 import time
 import os
+from contextlib import nullcontext
 from dataclasses import replace
 
 from src.handler_rl import HandlerRL
@@ -11,6 +12,7 @@ from src.hardware.status_leds import build_status_led_controller
 from src.hardware.volume_buttons import build_volume_button_controller
 from src.intermission import build_intermission_runner
 from src.questioner import reset_questioner_session_state
+from src.runtime.poweroff import clear_system_poweroff_request, request_system_poweroff
 from src.runtime.session_context import (
     activate_session_context,
     complete_current_session,
@@ -24,6 +26,7 @@ from src.runtime.session_context import (
 from src.runtime.user_context import build_guest_user_id, normalize_spoken_user_id
 from src.runtime.status_monitor import build_status_monitor, get_active_status_monitor, set_active_status_monitor
 from src.session.control import SessionShutdownRequested, build_session_control
+from src.utils import config_loader
 from src.utils.io_record import reset_record_state
 from src.utils.llm_client import preload_llm_runtime
 from src.utils.log_util import get_logger
@@ -33,11 +36,7 @@ from src.voice.io_loop import run_voice_io_loop, wait_for_voice_io_drain
 from src.voice.music import build_music
 
 logger = get_logger("VoiceApplication")
-SHUTDOWN_SPOKEN_MESSAGE = "Okay, closing Caiti now."
-BUTTON_SHUTDOWN_CONFIRMATION_PROMPT = (
-    "Do you want to close Caiti now? Please say yes to close, say no to keep going, "
-    "or press and hold the button again for three seconds."
-)
+SHUTDOWN_SPOKEN_MESSAGE = "Caiti is shutting down."
 USER_ID_PROMPT = "Before we begin, please say your participant ID."
 USER_ID_RETRY_PROMPT = "I did not catch the participant ID. Please say the participant ID again."
 USER_ID_FALLBACK_MESSAGE = "I did not catch an ID, so I will use a temporary guest ID for this session."
@@ -168,6 +167,10 @@ def _set_interrupt_check(backend, checker) -> None:
         method(checker)
 
 
+def _voice_access_context(voice_access_lock=None):
+    return voice_access_lock if voice_access_lock is not None else nullcontext()
+
+
 def _duck_music_for_tts(music) -> None:
     if _music_is_background(music):
         stop_method = getattr(music, "stop", None)
@@ -201,76 +204,26 @@ def _speak_shutdown_message(
     status_leds,
     message: str = SHUTDOWN_SPOKEN_MESSAGE,
     should_interrupt=None,
-) -> None:
+    voice_access_lock=None,
+) -> bool:
     text = str(message or "").strip()
     if not text:
-        return
-    try:
-        _set_interrupt_check(tts, should_interrupt)
-        _duck_music_for_tts(music)
-        _set_status_led(status_leds, "set_tts_active", True)
-        tts.speak(text)
-    except VoiceInterrupted:
-        logger.info("Shutdown message interrupted.")
-    except Exception as exc:
-        logger.warning("Failed to speak shutdown message: %s", exc)
-    finally:
-        _set_status_led(status_leds, "set_tts_active", False)
-        _set_interrupt_check(tts, None)
-
-
-def _speak_shutdown_confirmation_prompt(session_control, tts, music, status_leds) -> None:
-    should_interrupt = getattr(session_control, "is_shutdown_requested", None)
-    if not callable(should_interrupt):
-        should_interrupt = None
-    _speak_shutdown_message(
-        tts,
-        music,
-        status_leds,
-        BUTTON_SHUTDOWN_CONFIRMATION_PROMPT,
-        should_interrupt=should_interrupt,
-    )
-
-
-def _listen_for_shutdown_confirmation(session_control, stt, music, status_leds) -> str:
-    try:
-        _set_interrupt_check(stt, session_control.is_shutdown_requested)
-        _prepare_music_for_stt(music)
-        _set_status_led(status_leds, "set_stt_active", True)
-        return str(stt.listen() or "").strip()
-    except VoiceInterrupted:
-        logger.info("Shutdown confirmation listening interrupted.")
-        return ""
-    except Exception as exc:
-        logger.warning("Shutdown confirmation STT failed: %s", exc)
-        return ""
-    finally:
-        _set_status_led(status_leds, "set_stt_active", False)
-        _restore_music_volume(music)
-        _set_interrupt_check(stt, None)
-
-
-def _run_shutdown_confirmation(session_control, stt, tts, music, status_leds, voice_idle, speak_shutdown_once) -> None:
-    if not session_control.begin_shutdown_confirmation():
-        return
-    _wait_for_voice_idle(voice_idle)
-    _speak_shutdown_confirmation_prompt(session_control, tts, music, status_leds)
-    if session_control.is_shutdown_requested():
-        speak_shutdown_once()
-        return
-    response = _listen_for_shutdown_confirmation(session_control, stt, music, status_leds)
-    result = session_control.handle_shutdown_confirmation_response(response)
-    if result == "shutdown":
-        music.stop()
-        speak_shutdown_once()
-        return
-    if result == "cancelled":
-        _speak_shutdown_message(
-            tts,
-            music,
-            status_leds,
-            getattr(session_control.settings, "close_cancel_message", "Okay, we will keep going."),
-        )
+        return True
+    with _voice_access_context(voice_access_lock):
+        try:
+            _set_interrupt_check(tts, should_interrupt)
+            _duck_music_for_tts(music)
+            _set_status_led(status_leds, "set_tts_active", True)
+            tts.speak(text)
+            return True
+        except VoiceInterrupted:
+            logger.info("Shutdown message interrupted.")
+        except Exception as exc:
+            logger.warning("Failed to speak shutdown message: %s", exc)
+        finally:
+            _set_status_led(status_leds, "set_tts_active", False)
+            _set_interrupt_check(tts, None)
+    return False
 
 
 def _handle_short_press_with_music(session_control, music, voice_idle, restore_music_after_pause=None) -> None:
@@ -360,6 +313,14 @@ def _wait_for_session_start(
     return session_control.wait_for_start()
 
 
+def _should_auto_poweroff_after_session_complete() -> bool:
+    return bool(config_loader.SESSION_AUTO_POWEROFF_ON_COMPLETE)
+
+
+def _request_configured_system_poweroff(reason: str) -> bool:
+    return request_system_poweroff(reason)
+
+
 def _speak_prompt(
     tts,
     music,
@@ -368,6 +329,7 @@ def _speak_prompt(
     should_interrupt=None,
     source: str = "system",
     expects_response: bool = False,
+    voice_access_lock=None,
 ) -> None:
     monitor = get_active_status_monitor()
     if monitor is not None:
@@ -383,23 +345,25 @@ def _speak_prompt(
         status_leds,
         message=message,
         should_interrupt=should_interrupt,
+        voice_access_lock=voice_access_lock,
     )
 
 
-def _listen_with_stt(stt, music, status_leds, should_interrupt=None) -> str:
-    restore_background_music = _music_is_background(music) and _music_is_playing(music)
-    try:
-        _set_interrupt_check(stt, should_interrupt)
-        _prepare_music_for_stt(music)
-        _set_status_led(status_leds, "set_stt_active", True)
-        return str(stt.listen() or "").strip()
-    finally:
-        _set_status_led(status_leds, "set_stt_active", False)
-        if restore_background_music:
-            _resume_music(music)
-        else:
-            _restore_music_volume(music)
-        _set_interrupt_check(stt, None)
+def _listen_with_stt(stt, music, status_leds, should_interrupt=None, voice_access_lock=None) -> str:
+    with _voice_access_context(voice_access_lock):
+        restore_background_music = _music_is_background(music) and _music_is_playing(music)
+        try:
+            _set_interrupt_check(stt, should_interrupt)
+            _prepare_music_for_stt(music)
+            _set_status_led(status_leds, "set_stt_active", True)
+            return str(stt.listen() or "").strip()
+        finally:
+            _set_status_led(status_leds, "set_stt_active", False)
+            if restore_background_music:
+                _resume_music(music)
+            else:
+                _restore_music_volume(music)
+            _set_interrupt_check(stt, None)
 
 
 def _collect_identity_field(
@@ -412,6 +376,7 @@ def _collect_identity_field(
     retry_prompt: str,
     should_interrupt=None,
     max_attempts: int = 2,
+    voice_access_lock=None,
 ) -> str:
     prompt = initial_prompt
     for _attempt in range(max(1, int(max_attempts))):
@@ -423,8 +388,15 @@ def _collect_identity_field(
             should_interrupt=should_interrupt,
             source="identity",
             expects_response=True,
+            voice_access_lock=voice_access_lock,
         )
-        response = _listen_with_stt(stt, music, status_leds, should_interrupt=should_interrupt)
+        response = _listen_with_stt(
+            stt,
+            music,
+            status_leds,
+            should_interrupt=should_interrupt,
+            voice_access_lock=voice_access_lock,
+        )
         if response:
             return response
         prompt = retry_prompt
@@ -480,6 +452,7 @@ def _confirm_identity_candidate(
     retry_prompt: str,
     should_interrupt=None,
     max_attempts: int = 2,
+    voice_access_lock=None,
 ) -> bool:
     heard = " ".join(str(candidate or "").strip().split())
     if not heard:
@@ -494,8 +467,15 @@ def _confirm_identity_candidate(
             should_interrupt=should_interrupt,
             source="identity_confirm",
             expects_response=True,
+            voice_access_lock=voice_access_lock,
         )
-        response = _listen_with_stt(stt, music, status_leds, should_interrupt=should_interrupt)
+        response = _listen_with_stt(
+            stt,
+            music,
+            status_leds,
+            should_interrupt=should_interrupt,
+            voice_access_lock=voice_access_lock,
+        )
         if _is_affirmative_response(response):
             return True
         if _is_negative_response(response):
@@ -518,6 +498,7 @@ def _collect_confirmed_identity_field(
     normalizer=None,
     should_interrupt=None,
     max_capture_rounds: int = 3,
+    voice_access_lock=None,
 ) -> str:
     prompt = initial_prompt
     for _round in range(max(1, int(max_capture_rounds))):
@@ -530,6 +511,7 @@ def _collect_confirmed_identity_field(
             retry_prompt=retry_prompt,
             should_interrupt=should_interrupt,
             max_attempts=2,
+            voice_access_lock=voice_access_lock,
         )
         value = candidate
         if callable(normalizer):
@@ -548,6 +530,7 @@ def _collect_confirmed_identity_field(
             retry_prompt=confirm_retry_prompt,
             should_interrupt=should_interrupt,
             max_attempts=2,
+            voice_access_lock=voice_access_lock,
         ):
             return value
         prompt = reenter_prompt
@@ -559,7 +542,7 @@ def _refresh_runtime_user_dependent_state(stt) -> None:
         stt._emotion_side_channel = None
 
 
-def _run_user_intake(session_control, stt, tts, music, status_leds) -> tuple[str, str]:
+def _run_user_intake(session_control, stt, tts, music, status_leds, voice_access_lock=None) -> tuple[str, str]:
     set_phase = getattr(session_control, "set_phase", None)
     if callable(set_phase):
         set_phase("user_intake")
@@ -576,11 +559,20 @@ def _run_user_intake(session_control, stt, tts, music, status_leds) -> tuple[str
         reenter_prompt=USER_ID_REENTER_PROMPT,
         normalizer=normalize_spoken_user_id,
         should_interrupt=should_interrupt,
+        voice_access_lock=voice_access_lock,
     )
     normalized_user_id = normalize_spoken_user_id(raw_user_id)
     if not normalized_user_id:
         normalized_user_id = build_guest_user_id()
-        _speak_prompt(tts, music, status_leds, USER_ID_FALLBACK_MESSAGE, should_interrupt=should_interrupt, source="identity")
+        _speak_prompt(
+            tts,
+            music,
+            status_leds,
+            USER_ID_FALLBACK_MESSAGE,
+            should_interrupt=should_interrupt,
+            source="identity",
+            voice_access_lock=voice_access_lock,
+        )
     display_name = _collect_confirmed_identity_field(
         stt=stt,
         tts=tts,
@@ -592,6 +584,7 @@ def _run_user_intake(session_control, stt, tts, music, status_leds) -> tuple[str
         confirm_retry_prompt=USER_NAME_CONFIRM_RETRY_PROMPT,
         reenter_prompt=USER_NAME_REENTER_PROMPT,
         should_interrupt=should_interrupt,
+        voice_access_lock=voice_access_lock,
     )
     return normalized_user_id, display_name
 
@@ -604,6 +597,7 @@ def _choose_resume_session(
     tts,
     music,
     status_leds,
+    voice_access_lock=None,
 ) -> bool:
     should_interrupt = getattr(session_control, "is_shutdown_requested", None)
     prompt = RESUME_SESSION_PROMPT.format(value=participant_id)
@@ -616,12 +610,14 @@ def _choose_resume_session(
             should_interrupt=should_interrupt,
             source="session_resume",
             expects_response=True,
+            voice_access_lock=voice_access_lock,
         )
         response = _listen_with_stt(
             stt,
             music,
             status_leds,
             should_interrupt=should_interrupt,
+            voice_access_lock=voice_access_lock,
         )
         normalized = str(response or "").strip().lower()
         tokens = {token.strip(".,!?;:") for token in normalized.split()}
@@ -633,7 +629,7 @@ def _choose_resume_session(
     return False
 
 
-def _prepare_user_session(session_control, stt, tts, music, status_leds, intermission_runner):
+def _prepare_user_session(session_control, stt, tts, music, status_leds, intermission_runner, voice_access_lock=None):
     while True:
         raw_user_id, display_name = _run_user_intake(
             session_control,
@@ -641,6 +637,7 @@ def _prepare_user_session(session_control, stt, tts, music, status_leds, intermi
             tts,
             music,
             status_leds,
+            voice_access_lock=voice_access_lock,
         )
         if not is_protected_participant(raw_user_id):
             break
@@ -650,6 +647,7 @@ def _prepare_user_session(session_control, stt, tts, music, status_leds, intermi
             status_leds,
             PROTECTED_ID_MESSAGE,
             source="identity",
+            voice_access_lock=voice_access_lock,
         )
 
     resumable = find_resumable_session(raw_user_id)
@@ -660,6 +658,7 @@ def _prepare_user_session(session_control, stt, tts, music, status_leds, intermi
         tts=tts,
         music=music,
         status_leds=status_leds,
+        voice_access_lock=voice_access_lock,
     ):
         context = replace(
             resumable,
@@ -698,7 +697,7 @@ def _prepare_user_session(session_control, stt, tts, music, status_leds, intermi
         context.display_name or "",
     )
     acknowledgement = f"Thank you, {context.display_name}. Let's begin." if context.display_name else "Thank you. Let's begin."
-    _speak_prompt(tts, music, status_leds, acknowledgement, source="system")
+    _speak_prompt(tts, music, status_leds, acknowledgement, source="system", voice_access_lock=voice_access_lock)
     return context
 
 
@@ -722,6 +721,7 @@ def _cleanup_after_session_cycle(
     status_leds=None,
     status_monitor=None,
     intermission_runner=None,
+    reset_for_next_session: bool = True,
 ) -> None:
     set_phase = getattr(session_control, "set_phase", None)
     if callable(set_phase):
@@ -735,15 +735,16 @@ def _cleanup_after_session_cycle(
     clear_emotion_session_state()
     reset_questioner_session_state()
     deactivate_session_context()
-    reset_method = getattr(session_control, "reset_for_next_session", None)
-    if callable(reset_method):
-        reset_method()
-    reset_leds = getattr(status_leds, "reset_for_idle", None)
-    if callable(reset_leds):
-        reset_leds()
-    reset_monitor = getattr(status_monitor, "reset_for_idle", None)
-    if callable(reset_monitor):
-        reset_monitor()
+    if reset_for_next_session:
+        reset_method = getattr(session_control, "reset_for_next_session", None)
+        if callable(reset_method):
+            reset_method()
+        reset_leds = getattr(status_leds, "reset_for_idle", None)
+        if callable(reset_leds):
+            reset_leds()
+        reset_monitor = getattr(status_monitor, "reset_for_idle", None)
+        if callable(reset_monitor):
+            reset_monitor()
 
 
 def main():
@@ -753,17 +754,20 @@ def main():
     STT and TTS are local I/O adapters around the existing text pipeline:
     microphone/audio -> STT text -> CaiTI LLM/RL modules -> generated text -> TTS audio.
     """
+    clear_system_poweroff_request()
     status_monitor = build_status_monitor()
     set_active_status_monitor(status_monitor)
     stt = build_stt()
     tts = build_tts()
     music = build_music()
     status_leds = build_status_led_controller(status_monitor=status_monitor)
+    voice_access_lock = threading.RLock()
     intermission_runner = build_intermission_runner(
         stt=stt,
         primary_tts=tts,
         music=music,
         status_leds=status_leds,
+        voice_access_lock=voice_access_lock,
     )
     session_control = build_session_control(status_monitor=status_monitor)
     set_start_callback = getattr(status_monitor, "set_start_session_callback", None)
@@ -773,26 +777,24 @@ def main():
     shutdown_message_spoken = threading.Event()
     shutdown_voice_lock = threading.Lock()
 
-    def speak_shutdown_once() -> None:
+    def speak_shutdown_once() -> bool:
         if shutdown_message_spoken.is_set():
-            return
-        shutdown_message_spoken.set()
+            return True
         with shutdown_voice_lock:
-            _speak_shutdown_message(tts, music, status_leds)
+            if shutdown_message_spoken.is_set():
+                return True
+            spoken = _speak_shutdown_message(tts, music, status_leds, voice_access_lock=voice_access_lock)
+            if spoken is not False:
+                shutdown_message_spoken.set()
+                return True
+        return False
 
     def handle_short_press() -> None:
         _handle_short_press_with_music(session_control, music, voice_idle, restore_music_after_pause)
 
     def handle_long_press() -> None:
         restore_music_after_pause.clear()
-        event = session_control.handle_long_press()
-        if event == "shutdown_confirmation":
-            threading.Thread(
-                target=_run_shutdown_confirmation,
-                args=(session_control, stt, tts, music, status_leds, voice_idle, speak_shutdown_once),
-                name="caiti-shutdown-confirmation",
-                daemon=True,
-            ).start()
+        session_control.handle_long_press()
         if session_control.is_shutdown_requested():
             music.stop()
             threading.Thread(target=speak_shutdown_once, name="caiti-shutdown-message", daemon=True).start()
@@ -821,12 +823,15 @@ def main():
             "status_leds": status_leds,
             "session_control": session_control,
             "intermission_runner": intermission_runner,
+            "voice_access_lock": voice_access_lock,
         },
         daemon=True,
     )
     io_thread.start()
     logger.info("Voice I/O loop started.")
     persistent_loop = _persistent_app_loop_enabled()
+    poweroff_requested = False
+    poweroff_reason = ""
 
     try:
         if status_monitor.start():
@@ -852,14 +857,20 @@ def main():
             logger.info("Waiting for button to start CaiTI.")
             if not _wait_for_session_start(session_control, status_monitor, persistent_loop):
                 break
-            _prepare_user_session(
-                session_control,
-                stt,
-                tts,
-                music,
-                status_leds,
-                intermission_runner,
-            )
+            try:
+                _prepare_user_session(
+                    session_control,
+                    stt,
+                    tts,
+                    music,
+                    status_leds,
+                    intermission_runner,
+                    voice_access_lock=voice_access_lock,
+                )
+            except VoiceInterrupted:
+                if session_control.is_shutdown_requested():
+                    raise SessionShutdownRequested("Session shutdown requested during user intake.")
+                raise
             if not persistent_loop:
                 if not _music_is_background(music):
                     music.start()
@@ -874,28 +885,46 @@ def main():
                 session_control=session_control,
             )
             complete_current_session()
+            auto_poweroff = _should_auto_poweroff_after_session_complete()
+            if auto_poweroff or persistent_loop:
+                _cleanup_after_session_cycle(
+                    session_control=session_control,
+                    music=music,
+                    voice_idle=voice_idle,
+                    status_leds=status_leds,
+                    status_monitor=status_monitor,
+                    intermission_runner=intermission_runner,
+                    reset_for_next_session=not auto_poweroff,
+                )
+            if auto_poweroff:
+                poweroff_requested = True
+                poweroff_reason = "session complete"
+                break
             if not persistent_loop:
                 break
-            _cleanup_after_session_cycle(
-                session_control=session_control,
-                music=music,
-                voice_idle=voice_idle,
-                status_leds=status_leds,
-                status_monitor=status_monitor,
-                intermission_runner=intermission_runner,
-            )
     except SessionShutdownRequested:
         interrupt_current_session("session-button shutdown request")
         logger.info("Voice application closing after session-button shutdown request.")
         _wait_for_voice_idle(voice_idle)
         speak_shutdown_once()
+        _cleanup_after_session_cycle(
+            session_control=session_control,
+            music=music,
+            voice_idle=voice_idle,
+            status_leds=status_leds,
+            status_monitor=status_monitor,
+            intermission_runner=intermission_runner,
+            reset_for_next_session=False,
+        )
+        poweroff_requested = True
+        poweroff_reason = "button shutdown"
     except Exception:
         interrupt_current_session("unexpected voice application failure")
         raise
     finally:
         session_control.mark_closing()
         try:
-            if not session_control.is_shutdown_requested():
+            if not session_control.is_shutdown_requested() and not poweroff_requested:
                 wait_for_voice_io_drain(voice_idle, timeout_sec=90.0)
         except KeyboardInterrupt:
             logger.info("Voice application interrupted during voice I/O drain.")
@@ -908,6 +937,14 @@ def main():
             status_monitor.stop()
             set_active_status_monitor(None)
             time.sleep(0.3)
+    if poweroff_requested:
+        if not _request_configured_system_poweroff(poweroff_reason):
+            logger.warning(
+                "System poweroff was requested but marker creation failed. reason=%s marker=%s",
+                poweroff_reason,
+                config_loader.SESSION_POWEROFF_REQUEST_PATH,
+            )
+            raise SystemExit(config_loader.SESSION_POWEROFF_REQUEST_FAILURE_EXIT_CODE)
 
 
 if __name__ == "__main__":

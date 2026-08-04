@@ -2,6 +2,7 @@ import os
 import re
 import threading
 import time
+from contextlib import nullcontext
 from typing import Optional
 
 import pandas as pd
@@ -194,6 +195,10 @@ def _set_interrupt_check(backend, checker) -> None:
     method = getattr(backend, "set_interrupt_check", None)
     if callable(method):
         method(checker)
+
+
+def _voice_access_context(voice_access_lock=None):
+    return voice_access_lock if voice_access_lock is not None else nullcontext()
 
 
 def _set_response_profile(stt, profile: str) -> None:
@@ -422,6 +427,7 @@ def process_voice_turn(
     status_leds=None,
     session_control=None,
     intermission_runner=None,
+    voice_access_lock=None,
 ) -> bool:
     """
     Process one record.csv voice turn if a question is ready.
@@ -451,99 +457,102 @@ def process_voice_turn(
     if activity_event is not None:
         activity_event.clear()
 
-    should_interrupt = (lambda: _session_should_interrupt(session_control)) if session_control is not None else None
-    _set_interrupt_check(tts, should_interrupt)
-    _set_interrupt_check(stt, should_interrupt)
-    background_music_was_playing = _music_is_background(music) and _music_is_playing(music)
     try:
-        if music is not None:
-            _suspend_music_for_spoken_audio(music)
+        with _voice_access_context(voice_access_lock):
+            should_interrupt = (lambda: _session_should_interrupt(session_control)) if session_control is not None else None
+            _set_interrupt_check(tts, should_interrupt)
+            _set_interrupt_check(stt, should_interrupt)
+            background_music_was_playing = _music_is_background(music) and _music_is_playing(music)
+            try:
+                if music is not None:
+                    _suspend_music_for_spoken_audio(music)
 
-        question = original_question
-        spoken_question, expects_response, response_profile = parse_voice_prompt_metadata(question)
-        _set_response_profile(stt, response_profile)
-        spoken_chunks = split_spoken_chunks(spoken_question)
-        logger.info(
-            "Speaking question/response length=%s expects_response=%s response_profile=%s spoken_chunks=%s",
-            len(question),
-            expects_response,
-            response_profile,
-            len(spoken_chunks),
-        )
-        _speak_stream_chunks_with_status(tts, spoken_chunks, status_leds, should_interrupt=should_interrupt)
-
-        if expects_response:
-            transcript, listen_duration_sec = _collect_transcript(
-                stt,
-                tts,
-                empty_retries,
-                music,
-                status_leds,
-                should_interrupt,
-            )
-            with RECORD_LOCK:
-                df = _read_record()
-                df.loc[0, "Resp"] = transcript
-                df.loc[0, "Resp_Lock"] = 0
-                _write_record(df)
-            if transcript.strip():
-                _run_intermission_until_next_question(
-                    intermission_runner,
-                    should_interrupt,
-                    user_speech_duration_sec=listen_duration_sec,
+                question = original_question
+                spoken_question, expects_response, response_profile = parse_voice_prompt_metadata(question)
+                _set_response_profile(stt, response_profile)
+                spoken_chunks = split_spoken_chunks(spoken_question)
+                logger.info(
+                    "Speaking question/response length=%s expects_response=%s response_profile=%s spoken_chunks=%s",
+                    len(question),
+                    expects_response,
+                    response_profile,
+                    len(spoken_chunks),
                 )
-            else:
-                logger.info("Skipping intermission because the main transcript is empty.")
-            if music is not None:
-                _start_music(music)
-        else:
-            if background_music_was_playing:
-                _start_music(music)
-                _restore_music_volume(music)
-            with RECORD_LOCK:
-                df = _read_record()
-                df.loc[0, "Resp"] = ""
-                df.loc[0, "Resp_Lock"] = 1
-                _write_record(df)
-            logger.info("Spoke system message without collecting a response.")
-        return True
-    except VoiceInterrupted:
-        discard_interrupted_turn = _should_discard_interrupted_voice_turn(session_control)
-        if discard_interrupted_turn:
-            logger.info("Voice turn interrupted by workflow override; clearing pending question.")
-        else:
-            logger.info("Voice turn interrupted; restoring pending question for replay after resume.")
-        try:
-            with RECORD_LOCK:
-                df = _read_record()
-                df.loc[0, "Question"] = "" if discard_interrupted_turn else original_question
-                df.loc[0, "Question_Lock"] = 0 if discard_interrupted_turn else 1
-                df.loc[0, "Resp"] = ""
-                df.loc[0, "Resp_Lock"] = 1
-                _write_record(df)
-        except Exception as exc:
-            logger.warning("Failed to restore interrupted voice turn: %s", exc)
-        if music is not None:
-            if _music_is_background(music):
-                if _should_keep_music_on_interrupted_voice_turn(session_control):
-                    _start_music(music)
-                    _restore_music_volume(music)
+                _speak_stream_chunks_with_status(tts, spoken_chunks, status_leds, should_interrupt=should_interrupt)
+
+                if expects_response:
+                    transcript, listen_duration_sec = _collect_transcript(
+                        stt,
+                        tts,
+                        empty_retries,
+                        music,
+                        status_leds,
+                        should_interrupt,
+                    )
+                    with RECORD_LOCK:
+                        df = _read_record()
+                        df.loc[0, "Resp"] = transcript
+                        df.loc[0, "Resp_Lock"] = 0
+                        _write_record(df)
+                    if transcript.strip():
+                        _run_intermission_until_next_question(
+                            intermission_runner,
+                            should_interrupt,
+                            user_speech_duration_sec=listen_duration_sec,
+                        )
+                    else:
+                        logger.info("Skipping intermission because the main transcript is empty.")
+                    if music is not None:
+                        _start_music(music)
                 else:
-                    pause_method = getattr(music, "pause", None)
-                    if callable(pause_method):
-                        pause_method()
+                    if background_music_was_playing:
+                        _start_music(music)
+                        _restore_music_volume(music)
+                    with RECORD_LOCK:
+                        df = _read_record()
+                        df.loc[0, "Resp"] = ""
+                        df.loc[0, "Resp_Lock"] = 1
+                        _write_record(df)
+                    logger.info("Spoke system message without collecting a response.")
+                return True
+            except VoiceInterrupted:
+                discard_interrupted_turn = _should_discard_interrupted_voice_turn(session_control)
+                if discard_interrupted_turn:
+                    logger.info("Voice turn interrupted by workflow override; clearing pending question.")
+                else:
+                    logger.info("Voice turn interrupted; restoring pending question for replay after resume.")
+                try:
+                    with RECORD_LOCK:
+                        df = _read_record()
+                        df.loc[0, "Question"] = "" if discard_interrupted_turn else original_question
+                        df.loc[0, "Question_Lock"] = 0 if discard_interrupted_turn else 1
+                        df.loc[0, "Resp"] = ""
+                        df.loc[0, "Resp_Lock"] = 1
+                        _write_record(df)
+                except Exception as exc:
+                    logger.warning("Failed to restore interrupted voice turn: %s", exc)
+                if music is not None:
+                    if _music_is_background(music):
+                        if _should_keep_music_on_interrupted_voice_turn(session_control):
+                            _start_music(music)
+                            _restore_music_volume(music)
+                        else:
+                            pause_method = getattr(music, "pause", None)
+                            if callable(pause_method):
+                                pause_method()
+                            else:
+                                _stop_music(music)
                     else:
                         _stop_music(music)
-            else:
-                _stop_music(music)
-        _set_led_status(status_leds, "set_tts_active", False)
-        _set_led_status(status_leds, "set_stt_active", False)
-        if not discard_interrupted_turn:
-            _wait_if_paused(session_control)
-        return False
+                _set_led_status(status_leds, "set_tts_active", False)
+                _set_led_status(status_leds, "set_stt_active", False)
+                if not discard_interrupted_turn:
+                    _wait_if_paused(session_control)
+                return False
+            finally:
+                _set_interrupt_check(tts, None)
+                _set_interrupt_check(stt, None)
     finally:
-        _set_interrupt_check(tts, None)
-        _set_interrupt_check(stt, None)
         if activity_event is not None:
             activity_event.set()
 
@@ -609,6 +618,7 @@ def run_voice_io_loop(
     status_leds=None,
     session_control=None,
     intermission_runner=None,
+    voice_access_lock=None,
 ) -> None:
     """
     Bridge CaiTI's record.csv question/response protocol to local STT/TTS.
@@ -635,4 +645,5 @@ def run_voice_io_loop(
             status_leds,
             session_control=session_control,
             intermission_runner=intermission_runner,
+            voice_access_lock=voice_access_lock,
         )

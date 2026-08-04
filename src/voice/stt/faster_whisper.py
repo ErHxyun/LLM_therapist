@@ -229,6 +229,8 @@ class FasterWhisperSTT:
         }
         try:
             self._record(wav_file)
+            if self._should_interrupt():
+                raise VoiceInterrupted("STT interrupted after recording; transcription skipped.")
             transcript = self._transcribe(wav_file)
             return transcript
         finally:
@@ -250,6 +252,8 @@ class FasterWhisperSTT:
         }
         try:
             self._record(wav_file)
+            if self._should_interrupt():
+                raise VoiceInterrupted("STT interrupted after recording; transcription skipped.")
             if music is not None:
                 music.start()
             transcript = self._transcribe(wav_file)

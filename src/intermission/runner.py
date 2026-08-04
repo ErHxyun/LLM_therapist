@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -90,6 +91,7 @@ class IntermissionRunner:
     stt: object | None = None
     music: object | None = None
     status_leds: object | None = None
+    voice_access_lock: object | None = None
     store: IntermissionScreeningStore | None = None
     _screening_index: int = field(default=0, init=False)
     _screening_answers: dict[str, int | None] = field(default_factory=dict, init=False)
@@ -289,10 +291,11 @@ class IntermissionRunner:
             return
         listen_error = None
         try:
-            self._duck_music()
-            self._set_stt_active(True)
-            listen = getattr(self.stt, "listen")
-            response = str(listen() or "")
+            with self._voice_access_context():
+                self._duck_music()
+                self._set_stt_active(True)
+                listen = getattr(self.stt, "listen")
+                response = str(listen() or "")
         except Exception as exc:
             logger.info("Private intermission screening item %s was not resolved: %s", item.item_id, exc)
             listen_error = exc
@@ -376,19 +379,23 @@ class IntermissionRunner:
             led_active = bool(active)
             self._set_tts_active(led_active)
 
-        self._suspend_music_for_spoken_audio()
-        try:
-            if playback_status_hook_installed:
-                set_playback_status_hook(set_tts_active)
-            else:
-                set_tts_active(True)
-            self.tts.speak_stream(chunk)
-        finally:
-            if playback_status_hook_installed:
-                set_playback_status_hook(None)
-            if led_active:
-                self._set_tts_active(False)
-            self._resume_music_after_spoken_audio()
+        with self._voice_access_context():
+            self._suspend_music_for_spoken_audio()
+            try:
+                if playback_status_hook_installed:
+                    set_playback_status_hook(set_tts_active)
+                else:
+                    set_tts_active(True)
+                self.tts.speak_stream(chunk)
+            finally:
+                if playback_status_hook_installed:
+                    set_playback_status_hook(None)
+                if led_active:
+                    self._set_tts_active(False)
+                self._resume_music_after_spoken_audio()
+
+    def _voice_access_context(self):
+        return self.voice_access_lock if self.voice_access_lock is not None else nullcontext()
 
     def _music_is_background(self) -> bool:
         method = getattr(self.music, "is_background", None)
@@ -537,6 +544,7 @@ def build_intermission_runner(
     primary_tts=None,
     music=None,
     status_leds=None,
+    voice_access_lock=None,
 ) -> IntermissionRunner | NullIntermissionRunner:
     settings = build_intermission_settings()
     if not settings.enabled:
@@ -564,5 +572,6 @@ def build_intermission_runner(
         stt=stt,
         music=music,
         status_leds=status_leds,
+        voice_access_lock=voice_access_lock,
         store=store,
     )

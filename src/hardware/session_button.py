@@ -18,7 +18,7 @@ class SessionButtonSettings:
     enabled: bool = False
     board_pin: int = 37
     long_press_sec: float = 3.0
-    debounce_sec: float = 0.05
+    debounce_sec: float = 0.5
     poll_interval_sec: float = 0.01
     active_low: bool = True
 

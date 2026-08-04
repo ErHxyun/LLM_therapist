@@ -33,9 +33,9 @@ They assume the current local paths:
    If your Jetson uses a conda env or a venv, replace `python` in `ExecStart`
    with the absolute interpreter path.
 
-2. The voice app remains resident after a session and returns to
-   `ready_idle`. `Restart=always` is retained so a confirmed full shutdown or
-   unexpected process failure restarts the appliance controller.
+2. The voice app normally exits after a completed session or confirmed
+   shutdown. `Restart=on-failure` keeps unexpected failures recoverable without
+   relaunching the app after an intentional shutdown.
 
 3. The monitor remains local by default at `http://127.0.0.1:8765`.
 4. To publish the monitor on a real domain with login protection, use the
@@ -131,16 +131,21 @@ tail -f data/logs/systemd-caiti-cloudflared.log
   performs the `devmem` writes, so normal boot does not execute them twice.
 - `caiti-app.service` also requires `caiti-emotion.service` and keeps the
   emotion health check as a hard start gate.
+- Automatic poweroff after a completed session, and confirmed button shutdown,
+  use a systemd marker file instead of interactive sudo. The app writes
+  `/run/caiti/poweroff-request`, exits normally, and the root-level
+  `ExecStopPost` in `caiti-app.service` runs `systemctl --no-block poweroff`.
+  No sudoers rule is needed.
 - If your Jetson image does not have `busybox`, install it first.
 - If the app is silent under `sudo systemctl start caiti-app.service` but the
   same TTS command is audible from a normal terminal, move the app to the user
   service above. Exporting `HOME`, `DISPLAY`, and `PULSE_SERVER` alone is often
   not enough because the process is still outside the real user audio session.
-
 ## Current Session Lifecycle
 
 The deployed app preloads once, enters `ready_idle`, accepts a start request
 from Pin 37, the local monitor, or `scripts/caiti_control.py start`, runs one
-session, clears participant-specific live state, and returns to `ready_idle`.
+session, clears participant-specific live state, writes the poweroff marker,
+and exits so systemd can shut the Jetson down.
 Participant sessions created at or after the configured cutover are isolated
 under `data/users/<participant>/sessions/<session_id>/`.

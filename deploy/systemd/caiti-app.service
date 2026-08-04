@@ -19,13 +19,17 @@ Environment=CAITI_EMOTION_SERVICE_URL=http://127.0.0.1:8000/analyze
 Environment=CAITI_MONITOR_ENABLED=true
 Environment=CAITI_PERSISTENT_APP_LOOP=true
 Environment=CAITI_STT_AUDIO_DEVICE=plughw:CARD=Device,DEV=0
+RuntimeDirectory=caiti
+RuntimeDirectoryMode=0750
 ExecStartPre=/usr/bin/env bash /home/xiyun/Desktop/Projects/LLM_therapist/scripts/cleanup_audio.sh
 ExecStartPre=/usr/bin/env bash /home/xiyun/Desktop/Projects/LLM_therapist/scripts/wait_for_microphone.sh
 ExecStartPre=/usr/bin/env bash -lc 'for i in $(seq 1 180); do curl -fsS http://127.0.0.1:8890/health >/dev/null && exit 0; sleep 1; done; exit 1'
 ExecStartPre=/usr/bin/env bash -lc 'for i in $(seq 1 190); do curl -fsS http://127.0.0.1:8000/health >/dev/null && exit 0; sleep 1; done; exit 1'
 ExecStart=/usr/bin/env bash -lc 'cd /home/xiyun/Desktop/Projects/LLM_therapist && exec ./scripts/run_voice_app.sh'
 ExecStopPost=/usr/bin/env bash /home/xiyun/Desktop/Projects/LLM_therapist/scripts/cleanup_audio.sh
-Restart=always
+ExecStopPost=+/bin/sh -c 'if [ -f /run/caiti/poweroff-request ]; then rm -f /run/caiti/poweroff-request; exec /usr/bin/systemctl --no-block poweroff; fi'
+Restart=on-failure
+RestartPreventExitStatus=42
 RestartSec=3
 TimeoutStopSec=20
 KillMode=control-group

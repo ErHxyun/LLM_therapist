@@ -4,6 +4,9 @@ from src.hardware.session_button import SessionButtonController, SessionButtonSe
 
 
 class SessionButtonControllerTests(unittest.TestCase):
+    def test_default_debounce_is_half_a_second(self):
+        self.assertEqual(SessionButtonSettings().debounce_sec, 0.5)
+
     def test_short_press_emits_short_callback_on_release(self):
         events = []
         controller = SessionButtonController(

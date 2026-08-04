@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import dataclass, field
 
 from src.utils import config_loader
-from src.utils.io_record import get_resp_log, log_question, log_system_message
 from src.utils.log_util import get_logger
 
 logger = get_logger("SessionControl")
 
 
 class SessionShutdownRequested(RuntimeError):
-    """Raised when the user confirms that CaiTI should close."""
+    """Raised when the user requests that CaiTI should close."""
 
 
 @dataclass(frozen=True)
@@ -22,11 +20,6 @@ class SessionControlSettings:
     enabled: bool = False
     pause_message: str = "Caiti is paused. Press the button again when you are ready to continue."
     resume_message: str = "Okay, we will continue."
-    close_prompt: str = (
-        "Do you want to close Caiti now? Please say yes to close, say no to keep going, "
-        "or press and hold the button again for three seconds."
-    )
-    close_cancel_message: str = "Okay, we will keep going."
 
 
 @dataclass
@@ -43,9 +36,6 @@ class SessionControl:
     _paused: bool = field(default=False, init=False)
     _phase_before_pause: str = field(default="waiting_start", init=False)
     _skip_to_cbt_requested: bool = field(default=False, init=False)
-    _shutdown_confirm_requested: bool = field(default=False, init=False)
-    _awaiting_shutdown_confirmation: bool = field(default=False, init=False)
-    _phase_before_confirmation: str = field(default="waiting_start", init=False)
 
     def __post_init__(self) -> None:
         self._resume_event.set()
@@ -75,6 +65,12 @@ class SessionControl:
             return "start"
 
         with self._lock:
+            effective_phase = self._phase_before_pause if self._phase == "paused" else self._phase
+            if effective_phase not in {"screening", "cbt"}:
+                logger.info("Ignoring short press during non-pausable phase: %s", effective_phase)
+                self._publish_button_event(f"ignored:{effective_phase}")
+                return "ignored_busy"
+
             if self._paused:
                 self._paused = False
                 self._pause_requested = False
@@ -84,13 +80,6 @@ class SessionControl:
                 self._publish_button_event("resume")
                 logger.info("Session resume requested by button.")
                 return "resume"
-            if self._phase in {"preloading", "loading", "cleanup"}:
-                logger.info("Ignoring short press during busy phase: %s", self._phase)
-                self._publish_button_event(f"ignored:{self._phase}")
-                return "ignored_busy"
-            if self._awaiting_shutdown_confirmation:
-                logger.info("Ignoring short press while waiting for shutdown confirmation.")
-                return "ignored_shutdown_confirmation"
             self._pause_requested = True
             self._paused = True
             self._phase_before_pause = self._phase
@@ -110,10 +99,6 @@ class SessionControl:
                 logger.info("Ignoring long press during busy phase: %s", self._phase)
                 self._publish_button_event(f"ignored:{self._phase}")
                 return "ignored_busy"
-            if self._awaiting_shutdown_confirmation or self._shutdown_confirm_requested:
-                self._publish_button_event("shutdown_confirmed_by_long_press")
-                self._request_shutdown_locked("second long press")
-                return "shutdown_confirmed_by_long_press"
             effective_phase = self._phase_before_pause if self._phase == "paused" else self._phase
             if effective_phase == "screening" and not self._skip_to_cbt_requested:
                 self._skip_to_cbt_requested = True
@@ -124,15 +109,12 @@ class SessionControl:
                 self._publish_button_event("skip_to_cbt")
                 logger.info("Skip-to-CBT requested by long button press.")
                 return "skip_to_cbt"
-            self._shutdown_confirm_requested = True
+            self._publish_button_event("shutdown_requested_by_long_press")
             self._paused = False
             self._pause_requested = False
             self._resume_event.set()
-            self._phase_before_confirmation = effective_phase
-            self._set_phase_locked("confirm_exit")
-            self._publish_button_event("shutdown_confirmation")
-            logger.info("Shutdown confirmation requested by long button press.")
-            return "shutdown_confirmation"
+            self._request_shutdown_locked(f"long press in {effective_phase}")
+            return "shutdown_requested_by_long_press"
 
     def wait_for_start(self, poll_interval_sec: float = 0.1) -> bool:
         while not self._shutdown_event.is_set():
@@ -142,13 +124,11 @@ class SessionControl:
 
     def mark_screening(self) -> None:
         with self._lock:
-            if self._phase != "confirm_exit":
-                self._set_phase_locked("screening")
+            self._set_phase_locked("screening")
 
     def mark_cbt(self) -> None:
         with self._lock:
-            if self._phase != "confirm_exit":
-                self._set_phase_locked("cbt")
+            self._set_phase_locked("cbt")
 
     def mark_closing(self) -> None:
         with self._lock:
@@ -169,9 +149,6 @@ class SessionControl:
             self._paused = False
             self._phase_before_pause = "waiting_start"
             self._skip_to_cbt_requested = False
-            self._shutdown_confirm_requested = False
-            self._awaiting_shutdown_confirmation = False
-            self._phase_before_confirmation = "waiting_start"
             self._set_phase_locked("waiting_start")
 
     def checkpoint(self, location: str) -> str:
@@ -188,14 +165,6 @@ class SessionControl:
             return "continue"
         if self.is_shutdown_requested():
             raise SessionShutdownRequested("Session shutdown requested.")
-        if self._consume_shutdown_confirmation_request():
-            self._confirm_shutdown_with_voice()
-            if self.is_shutdown_requested():
-                raise SessionShutdownRequested("Session shutdown requested.")
-        if self._is_awaiting_shutdown_confirmation():
-            self._wait_for_shutdown_confirmation_resolution()
-            if self.is_shutdown_requested():
-                raise SessionShutdownRequested("Session shutdown requested.")
         if self.is_paused():
             self._pause_until_resumed()
             if self.is_shutdown_requested():
@@ -217,8 +186,6 @@ class SessionControl:
                 self._shutdown_event.is_set()
                 or self._paused
                 or self._skip_to_cbt_requested
-                or self._shutdown_confirm_requested
-                or self._awaiting_shutdown_confirmation
             )
 
     def should_interrupt_workflow_wait(self) -> bool:
@@ -240,8 +207,6 @@ class SessionControl:
             return bool(
                 self._skip_to_cbt_requested
                 and not self._shutdown_event.is_set()
-                and not self._shutdown_confirm_requested
-                and not self._awaiting_shutdown_confirmation
             )
 
     def wait_while_paused(self, poll_interval_sec: float = 0.1) -> None:
@@ -261,12 +226,6 @@ class SessionControl:
         self._consume_pause_request()
         logger.info("Session paused.")
         while not self._shutdown_event.is_set():
-            if self._consume_shutdown_confirmation_request():
-                self._confirm_shutdown_with_voice()
-                if self.is_shutdown_requested():
-                    return
-                if not self._paused:
-                    break
             if self._resume_event.wait(timeout=0.1):
                 break
         if not self.is_shutdown_requested():
@@ -279,73 +238,9 @@ class SessionControl:
             self._skip_to_cbt_requested = False
             return True
 
-    def _is_awaiting_shutdown_confirmation(self) -> bool:
-        with self._lock:
-            return self._awaiting_shutdown_confirmation
-
-    def _wait_for_shutdown_confirmation_resolution(self) -> None:
-        logger.info("Waiting for shutdown confirmation response.")
-        while True:
-            with self._lock:
-                if self._shutdown_event.is_set() or not self._awaiting_shutdown_confirmation:
-                    return
-            time.sleep(0.1)
-
-    def _consume_shutdown_confirmation_request(self) -> bool:
-        with self._lock:
-            if not self._shutdown_confirm_requested:
-                return False
-            self._shutdown_confirm_requested = False
-            self._awaiting_shutdown_confirmation = True
-            if self._phase != "confirm_exit":
-                self._phase_before_confirmation = self._phase
-                self._set_phase_locked("confirm_exit")
-            return True
-
-    def begin_shutdown_confirmation(self) -> bool:
-        with self._lock:
-            if self._shutdown_event.is_set():
-                return False
-            if not self._shutdown_confirm_requested and not self._awaiting_shutdown_confirmation:
-                return False
-            self._shutdown_confirm_requested = False
-            self._awaiting_shutdown_confirmation = True
-            if self._phase != "confirm_exit":
-                self._phase_before_confirmation = self._phase
-                self._set_phase_locked("confirm_exit")
-            return True
-
-    def handle_shutdown_confirmation_response(self, response: object) -> str:
-        with self._lock:
-            if self._shutdown_event.is_set():
-                return "shutdown"
-            if not self._awaiting_shutdown_confirmation:
-                return "ignored"
-            if _is_affirmative_shutdown_response(response):
-                self._request_shutdown_locked("voice confirmation")
-                return "shutdown"
-            self._awaiting_shutdown_confirmation = False
-            self._shutdown_confirm_requested = False
-            if self._phase == "confirm_exit":
-                self._set_phase_locked(self._phase_before_confirmation)
-            self._publish_button_event("shutdown_cancelled")
-        logger.info("Shutdown confirmation cancelled by voice response: %r", response)
-        return "cancelled"
-
-    def _confirm_shutdown_with_voice(self) -> None:
-        logger.info("Asking user to confirm shutdown.")
-        self.begin_shutdown_confirmation()
-        log_question(self.settings.close_prompt)
-        response = get_resp_log(should_stop=self.is_shutdown_requested)
-        if self.is_shutdown_requested():
-            return
-        if self.handle_shutdown_confirmation_response(response) == "cancelled":
-            log_system_message(self.settings.close_cancel_message)
-
     def _request_shutdown_locked(self, source: str) -> None:
         self._shutdown_event.set()
         self._resume_event.set()
-        self._awaiting_shutdown_confirmation = False
         self._set_phase_locked("closing")
         logger.info("Session shutdown requested by %s.", source)
 
@@ -374,33 +269,6 @@ class SessionControl:
             method(event)
         except Exception as exc:
             logger.warning("Status monitor button update failed: %s", exc)
-
-
-def _is_affirmative_shutdown_response(response: object) -> bool:
-    text = str(response or "").strip().lower()
-    if not text:
-        return False
-    yes_phrases = {
-        "yes",
-        "yeah",
-        "yep",
-        "sure",
-        "confirm",
-        "confirmed",
-        "close",
-        "close it",
-        "close app",
-        "close the app",
-        "shut down",
-        "shutdown",
-        "turn off",
-        "exit",
-        "quit",
-    }
-    if text in yes_phrases:
-        return True
-    tokens = {token.strip(".,!?;:") for token in text.split()}
-    return bool(tokens & {"yes", "yeah", "yep", "confirm", "exit", "quit"})
 
 
 def build_session_control(status_monitor=None) -> SessionControl:
@@ -459,9 +327,3 @@ class NullSessionControl:
 
     def is_shutdown_requested(self) -> bool:
         return False
-
-    def begin_shutdown_confirmation(self) -> bool:
-        return False
-
-    def handle_shutdown_confirmation_response(self, response: object) -> str:
-        return "ignored"

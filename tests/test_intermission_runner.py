@@ -88,6 +88,61 @@ class IntermissionRunnerTests(unittest.TestCase):
         self.assertGreaterEqual(music_events.count("duck"), 2)
         self.assertEqual(music_events.count("duck"), music_events.count("restore"))
 
+    def test_intermission_uses_voice_access_lock_for_tts_and_stt(self):
+        ready = {"value": False}
+        events = []
+
+        class TrackingLock:
+            active = False
+
+            def __enter__(self):
+                events.append("lock.enter")
+                self.active = True
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self.active = False
+                events.append("lock.exit")
+
+        voice_lock = TrackingLock()
+        test_case = self
+
+        class FakeTTS:
+            def speak_stream(self, text):
+                test_case.assertTrue(voice_lock.active)
+                events.append(f"tts:{text}")
+
+        class FakeSTT:
+            def listen(self):
+                test_case.assertTrue(voice_lock.active)
+                events.append("stt.listen")
+                ready["value"] = True
+                return "not at all"
+
+        runner = IntermissionRunner(
+            IntermissionSettings(
+                enabled=True,
+                screening_enabled=True,
+                breathing_enabled=False,
+                mindfulness_enabled=False,
+                max_seconds=5,
+                trigger_min_user_speech_sec=0,
+                trigger_min_interval_turns=0,
+                trigger_probability=1.0,
+                bridge_text="Back to Caiti.",
+                transition_delay_sec=0,
+            ),
+            tts=FakeTTS(),
+            stt=FakeSTT(),
+            voice_access_lock=voice_lock,
+        )
+
+        runner.run_until_ready(lambda: ready["value"])
+
+        self.assertIn("stt.listen", events)
+        self.assertGreaterEqual(events.count("lock.enter"), 4)
+        self.assertEqual(events.count("lock.enter"), events.count("lock.exit"))
+
     def test_scripted_task_runs_without_stt_or_main_record_dependencies(self):
         ready = {"value": False}
         spoken = []

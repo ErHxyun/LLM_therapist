@@ -51,6 +51,22 @@ SESSION_RESUME_INCOMPLETE = _bool_env(
     "CAITI_RESUME_INCOMPLETE_SESSION",
     SESSION.get("resume_incomplete_session", True),
 )
+SESSION_AUTO_POWEROFF_ON_COMPLETE = _bool_env(
+    "CAITI_AUTO_POWEROFF_ON_COMPLETE",
+    SESSION.get("auto_poweroff_on_complete", False),
+)
+SESSION_POWEROFF_REQUEST_PATH = str(
+    os.environ.get(
+        "CAITI_POWEROFF_REQUEST_PATH",
+        str(SESSION.get("poweroff_request_path", "/run/caiti/poweroff-request")),
+    )
+).strip()
+SESSION_POWEROFF_REQUEST_FAILURE_EXIT_CODE = int(
+    os.environ.get(
+        "CAITI_POWEROFF_REQUEST_FAILURE_EXIT_CODE",
+        str(SESSION.get("poweroff_request_failure_exit_code", 42)),
+    )
+)
 SESSION_Q_TABLE_SCOPE = str(
     os.environ.get("CAITI_Q_TABLE_SCOPE", SESSION.get("q_table_scope", "session"))
 ).strip().lower()
@@ -480,7 +496,7 @@ HARDWARE_SESSION_BUTTON_LONG_PRESS_SEC = float(
     os.environ.get("CAITI_SESSION_BUTTON_LONG_PRESS_SEC", str(HARDWARE.get("session_button_long_press_sec", 3.0)))
 )
 HARDWARE_SESSION_BUTTON_DEBOUNCE_SEC = float(
-    os.environ.get("CAITI_SESSION_BUTTON_DEBOUNCE_SEC", str(HARDWARE.get("session_button_debounce_sec", 0.05)))
+    os.environ.get("CAITI_SESSION_BUTTON_DEBOUNCE_SEC", str(HARDWARE.get("session_button_debounce_sec", 0.5)))
 )
 HARDWARE_SESSION_BUTTON_POLL_INTERVAL_SEC = float(
     os.environ.get("CAITI_SESSION_BUTTON_POLL_INTERVAL_SEC", str(HARDWARE.get("session_button_poll_interval_sec", 0.01)))

@@ -8,6 +8,9 @@ session:
   protect_pre_cutover_participants: true
   resume_incomplete_session: true
   q_table_scope: "session"
+  auto_poweroff_on_complete: true
+  poweroff_request_path: "/run/caiti/poweroff-request"
+  poweroff_request_failure_exit_code: 42
 
 paths:
   # Use forward slashes or absolute Windows paths
@@ -204,7 +207,7 @@ hardware:
   session_button_enabled: true
   session_button_board_pin: 37
   session_button_long_press_sec: 3.0
-  session_button_debounce_sec: 0.05
+  session_button_debounce_sec: 0.5
   session_button_poll_interval_sec: 0.01
   session_button_active_low: true
 
