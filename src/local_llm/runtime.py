@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+import threading
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 
 from src.local_llm.routing import TASK_TO_ADAPTER, resolve_adapter
 from src.local_llm.types import GenerationConfig, GenerationResult, LLMTask
+from src.utils.log_util import get_logger
+
+
+logger = get_logger("LocalLLMRuntime")
 
 
 @dataclass(frozen=True)
@@ -25,15 +31,36 @@ class RuntimeSettings:
 
 
 class LocalCaiTIRuntime:
-    """Load one base model and switch between preloaded CaiTI adapters."""
+    """Load the base model, then make noncritical adapters ready in the background."""
 
     def __init__(self, settings: RuntimeSettings):
         self.settings = settings
+        self._model_lock = threading.RLock()
+        self._adapter_state_lock = threading.Lock()
+        self._adapter_loader_thread: threading.Thread | None = None
+        self._startup_timings: dict[str, float] = {}
+        self._adapter_states = {
+            task: {"state": "pending", "seconds": None, "error": None}
+            for task in TASK_TO_ADAPTER
+        }
+
+        startup_started = time.perf_counter()
         self._load_dependencies()
-        self.tokenizer = self._load_tokenizer()
-        self.base_model = self._load_base_model()
-        self.model = self._load_adapters()
+        self.tokenizer = self._measure("tokenizer", self._load_tokenizer)
+        self.base_model = self._measure("base_model", self._load_base_model)
+
+        first_task = LLMTask.TASK1_RESPONSE_ANALYZER
+        self.model = self._load_first_adapter(first_task)
         self.model.eval()
+        self._startup_timings["task1_ready_total"] = round(
+            time.perf_counter() - startup_started,
+            3,
+        )
+        logger.info(
+            "Local LLM Task 1 ready after %.3fs; loading remaining adapters in background.",
+            self._startup_timings["task1_ready_total"],
+        )
+        self._start_background_adapter_loading()
 
     def generate_base(
         self,
@@ -50,10 +77,11 @@ class LocalCaiTIRuntime:
             tokenize=False,
             add_generation_prompt=True,
         )
-        disable = getattr(self.model, "disable_adapter", None)
-        context = disable() if callable(disable) else nullcontext()
-        with context:
-            text = self._generate_text(self.model, prompt, config)
+        with self._model_lock:
+            disable = getattr(self.model, "disable_adapter", None)
+            context = disable() if callable(disable) else nullcontext()
+            with context:
+                text = self._generate_text(self.model, prompt, config)
         return GenerationResult(text=text, task=LLMTask.BASE, adapter=None, raw_text=text)
 
     def generate_adapter(
@@ -63,9 +91,129 @@ class LocalCaiTIRuntime:
         config: GenerationConfig,
     ) -> GenerationResult:
         adapter = resolve_adapter(task)
-        self.model.set_adapter(task.value)
-        text = self._generate_text(self.model, prompt, config)
+        with self._model_lock:
+            self._ensure_adapter_loaded_locked(task)
+            self.model.set_adapter(task.value)
+            text = self._generate_text(self.model, prompt, config)
         return GenerationResult(text=text, task=task, adapter=adapter, raw_text=text)
+
+    def adapter_status(self) -> dict[str, dict[str, object]]:
+        """Return a stable snapshot suitable for the server health response."""
+
+        with self._adapter_state_lock:
+            return {
+                task.value: dict(details)
+                for task, details in self._adapter_states.items()
+            }
+
+    def startup_timings(self) -> dict[str, float]:
+        with self._adapter_state_lock:
+            return dict(self._startup_timings)
+
+    def wait_for_background_adapters(self, timeout: float | None = None) -> bool:
+        """Wait for background loading; primarily useful for diagnostics and tests."""
+
+        thread = self._adapter_loader_thread
+        if thread is None:
+            return True
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
+
+    def _measure(self, name: str, operation):
+        started = time.perf_counter()
+        result = operation()
+        elapsed = round(time.perf_counter() - started, 3)
+        self._startup_timings[name] = elapsed
+        logger.info("Local LLM %s loaded in %.3fs.", name, elapsed)
+        return result
+
+    def _load_first_adapter(self, task: LLMTask):
+        self._set_adapter_state(task, "loading")
+        started = time.perf_counter()
+        try:
+            source = self._resolve_adapter_source(resolve_adapter(task))
+            model = self._peft_model_cls.from_pretrained(
+                self.base_model,
+                source,
+                adapter_name=task.value,
+            )
+        except Exception as exc:
+            self._finish_adapter_load(task, started, error=exc)
+            raise
+        self._finish_adapter_load(task, started)
+        return model
+
+    def _start_background_adapter_loading(self) -> None:
+        self._adapter_loader_thread = threading.Thread(
+            target=self._load_remaining_adapters,
+            name="caiti-adapter-loader",
+            daemon=True,
+        )
+        self._adapter_loader_thread.start()
+
+    def _load_remaining_adapters(self) -> None:
+        for task in TASK_TO_ADAPTER:
+            if task == LLMTask.TASK1_RESPONSE_ANALYZER:
+                continue
+            try:
+                with self._model_lock:
+                    if self._adapter_state(task)["state"] == "ready":
+                        continue
+                    self._load_additional_adapter_locked(task)
+            except Exception:
+                logger.exception("Background adapter load failed for %s.", task.value)
+            time.sleep(0)
+        logger.info("Local LLM background adapter loading finished.")
+
+    def _ensure_adapter_loaded_locked(self, task: LLMTask) -> None:
+        state = self._adapter_state(task)
+        if state["state"] == "ready":
+            return
+        if state["state"] == "failed":
+            raise RuntimeError(
+                f"Adapter {task.value} failed to load: {state['error']}"
+            )
+        self._load_additional_adapter_locked(task)
+
+    def _load_additional_adapter_locked(self, task: LLMTask) -> None:
+        self._set_adapter_state(task, "loading")
+        started = time.perf_counter()
+        try:
+            source = self._resolve_adapter_source(resolve_adapter(task))
+            self.model.load_adapter(source, adapter_name=task.value)
+        except Exception as exc:
+            self._finish_adapter_load(task, started, error=exc)
+            raise
+        self._finish_adapter_load(task, started)
+
+    def _adapter_state(self, task: LLMTask) -> dict[str, object]:
+        with self._adapter_state_lock:
+            return dict(self._adapter_states[task])
+
+    def _set_adapter_state(self, task: LLMTask, state: str) -> None:
+        with self._adapter_state_lock:
+            self._adapter_states[task] = {
+                "state": state,
+                "seconds": None,
+                "error": None,
+            }
+
+    def _finish_adapter_load(
+        self,
+        task: LLMTask,
+        started: float,
+        error: Exception | None = None,
+    ) -> None:
+        elapsed = round(time.perf_counter() - started, 3)
+        with self._adapter_state_lock:
+            self._adapter_states[task] = {
+                "state": "failed" if error else "ready",
+                "seconds": elapsed,
+                "error": str(error) if error else None,
+            }
+            self._startup_timings[f"adapter.{task.value}"] = elapsed
+        if error is None:
+            logger.info("Local LLM adapter %s loaded in %.3fs.", task.value, elapsed)
 
     def _load_dependencies(self) -> None:
         try:
@@ -91,6 +239,7 @@ class LocalCaiTIRuntime:
         tokenizer_ref = self.settings.tokenizer_id or self.settings.model_id
         kwargs = {
             "trust_remote_code": self.settings.trust_remote_code,
+            "local_files_only": True,
         }
         if self.settings.tokenizer_subdir:
             kwargs["subfolder"] = self.settings.tokenizer_subdir
@@ -116,6 +265,7 @@ class LocalCaiTIRuntime:
         kwargs = {
             "trust_remote_code": self.settings.trust_remote_code,
             "torch_dtype": self._resolve_dtype(),
+            "local_files_only": True,
         }
         if self.settings.base_subdir:
             kwargs["subfolder"] = self.settings.base_subdir
@@ -123,23 +273,6 @@ class LocalCaiTIRuntime:
         if device_map is not None:
             kwargs["device_map"] = device_map
         return self._model_cls.from_pretrained(self.settings.model_id, **kwargs)
-
-    def _load_adapters(self):
-        adapter_items = list(TASK_TO_ADAPTER.items())
-        first_task, first_adapter = adapter_items[0]
-        first_adapter_source = self._resolve_adapter_source(first_adapter)
-        model = self._peft_model_cls.from_pretrained(
-            self.base_model,
-            first_adapter_source,
-            adapter_name=first_task.value,
-        )
-        for task, adapter in adapter_items[1:]:
-            adapter_source = self._resolve_adapter_source(adapter)
-            model.load_adapter(
-                adapter_source,
-                adapter_name=task.value,
-            )
-        return model
 
     def _resolve_adapter_source(self, adapter_subdir: str) -> str:
         local_candidate = Path(self.settings.model_id) / adapter_subdir
@@ -149,6 +282,7 @@ class LocalCaiTIRuntime:
         snapshot_dir = self._snapshot_download(
             repo_id=self.settings.model_id,
             allow_patterns=[f"{adapter_subdir}/*"],
+            local_files_only=True,
         )
         return str(Path(snapshot_dir) / adapter_subdir)
 

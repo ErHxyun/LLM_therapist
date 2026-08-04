@@ -17,6 +17,23 @@ class _FakeSettings:
 class _FakeRuntime:
     settings = _FakeSettings()
 
+    def adapter_status(self):
+        return {
+            LLMTask.TASK1_RESPONSE_ANALYZER.value: {
+                "state": "ready",
+                "seconds": 1.25,
+                "error": None,
+            },
+            LLMTask.TASK2_GENERAL_RESPONSE.value: {
+                "state": "loading",
+                "seconds": None,
+                "error": None,
+            },
+        }
+
+    def startup_timings(self):
+        return {"tokenizer": 0.5, "task1_ready_total": 3.0}
+
     def generate_base(self, system_content, user_content, config):
         return GenerationResult(
             text=f"base:{system_content}:{user_content}:{config.max_new_tokens}",
@@ -44,7 +61,13 @@ class LocalLLMServerTests(unittest.TestCase):
             with request.urlopen(f"{base_url}/health", timeout=2) as response:
                 health = json.loads(response.read().decode("utf-8"))
             self.assertTrue(health["ok"])
+            self.assertEqual(health["readiness"], "task1_ready")
             self.assertEqual(health["model_id"], "fake-model")
+            self.assertEqual(
+                health["adapters"][LLMTask.TASK2_GENERAL_RESPONSE.value]["state"],
+                "loading",
+            )
+            self.assertEqual(health["startup_timings_seconds"]["task1_ready_total"], 3.0)
 
             payload = json.dumps(
                 {

@@ -40,10 +40,17 @@ class LocalLLMService:
         self._lock = threading.Lock()
 
     def health(self) -> dict[str, Any]:
+        adapter_status = getattr(self.runtime, "adapter_status", None)
+        startup_timings = getattr(self.runtime, "startup_timings", None)
         return {
             "ok": True,
+            "readiness": "task1_ready",
             "model_id": self.runtime.settings.model_id,
             "device_map": self.runtime.settings.device_map,
+            "adapters": adapter_status() if callable(adapter_status) else {},
+            "startup_timings_seconds": (
+                startup_timings() if callable(startup_timings) else {}
+            ),
         }
 
     def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
